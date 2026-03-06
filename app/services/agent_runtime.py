@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from app.services.orchestration_policy import ExecutionMode, policy_for_mode
@@ -24,6 +25,14 @@ class AgentLimitExceededError(AgentRuntimeError):
 
 class ChildSynthesisRequiredError(AgentRuntimeError):
     """Raised when unsupervised worker output is requested."""
+
+
+class ExecutionMode(str, Enum):
+    """Execution mode selected by task-analysis policy."""
+
+    SEQUENTIAL = "SEQUENTIAL"
+    PARALLEL = "PARALLEL"
+    HYBRID = "HYBRID"
 
 
 @dataclass(frozen=True)
@@ -72,6 +81,48 @@ class ChildOutputRecord:
     synthesized_output: str | None = None
 
 
+@dataclass(frozen=True)
+class TaskAnalysisInputs:
+    """Inputs used to choose execution mode before delegation."""
+
+    decomposition_count_estimate: int
+    dependency_graph_density: float
+    urgency: str
+    token_budget: int
+    tool_latency_profile: str
+
+
+@dataclass(frozen=True)
+class ExecutionModeDecision:
+    """Persisted execution mode decision with machine-readable reason."""
+
+    mode: ExecutionMode
+    reason_code: str
+    reason: str
+    task_analysis: TaskAnalysisInputs
+
+
+@dataclass(frozen=True)
+class DelegationTask:
+    """Delegation unit used by orchestration mode scheduler."""
+
+    task_id: str
+    role: str
+    objective: str
+    constraints: list[str]
+    max_tool_calls: int
+    max_runtime_sec: int
+    dependencies: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class DelegationExecutionPlan:
+    """Mode-aware delegation schedule represented as staged fan-out batches."""
+
+    mode: ExecutionMode
+    stages: list[list[str]]
+
+
 @dataclass
 class AgentRuntime:
     """In-memory runtime with parent/child spawning and guardrails."""
@@ -82,6 +133,7 @@ class AgentRuntime:
         self.events: list[RuntimeEvent] = []
         self._agents: dict[str, AgentState] = {}
         self._child_outputs: dict[str, ChildOutputRecord] = {}
+        self._execution_decisions: dict[str, ExecutionModeDecision] = {}
 
     def register_lead_agent(
         self,
@@ -172,6 +224,165 @@ class AgentRuntime:
             },
         )
         return child_agent_id
+
+    def compute_task_analysis_inputs(
+        self,
+        *,
+        decomposition_count_estimate: int,
+        dependency_graph_density: float,
+        urgency: str,
+        token_budget: int,
+        tool_latency_profile: str,
+    ) -> TaskAnalysisInputs:
+        """Builds normalized task-analysis inputs used before delegation."""
+
+        normalized_urgency = urgency.strip().lower() or "normal"
+        return TaskAnalysisInputs(
+            decomposition_count_estimate=max(1, decomposition_count_estimate),
+            dependency_graph_density=min(max(dependency_graph_density, 0.0), 1.0),
+            urgency=normalized_urgency,
+            token_budget=max(1, token_budget),
+            tool_latency_profile=tool_latency_profile.strip().lower() or "mixed",
+        )
+
+    def select_execution_mode(self, *, parent_agent_id: str, task_analysis: TaskAnalysisInputs) -> ExecutionModeDecision:
+        """Decides SEQUENTIAL/PARALLEL/HYBRID and persists reason for orchestration."""
+
+        density = task_analysis.dependency_graph_density
+        high_latency = task_analysis.tool_latency_profile in {"high", "network", "io-bound"}
+        high_urgency = task_analysis.urgency in {"urgent", "high", "critical"}
+        many_subtasks = task_analysis.decomposition_count_estimate >= 4
+
+        if density >= 0.65:
+            mode = ExecutionMode.SEQUENTIAL
+            reason_code = "dependent_steps"
+            reason = "dependency graph is dense, so staged dependency pipeline is safer"
+        elif density <= 0.3 and many_subtasks and (high_latency or high_urgency):
+            mode = ExecutionMode.PARALLEL
+            reason_code = "independent_high_latency_work"
+            reason = "branches are independent and latency/urgency favors fan-out"
+        else:
+            mode = ExecutionMode.HYBRID
+            reason_code = "mixed_dependencies"
+            reason = "independent exploration with dependent synthesis is optimal"
+
+        decision = ExecutionModeDecision(
+            mode=mode,
+            reason_code=reason_code,
+            reason=reason,
+            task_analysis=task_analysis,
+        )
+        self._execution_decisions[parent_agent_id] = decision
+        self._emit(
+            "execution.mode.selected",
+            {
+                "parent_agent_id": parent_agent_id,
+                "mode": mode.value,
+                "reason_code": reason_code,
+                "reason": reason,
+                "task_analysis": {
+                    "decomposition_count_estimate": task_analysis.decomposition_count_estimate,
+                    "dependency_graph_density": task_analysis.dependency_graph_density,
+                    "urgency": task_analysis.urgency,
+                    "token_budget": task_analysis.token_budget,
+                    "tool_latency_profile": task_analysis.tool_latency_profile,
+                },
+            },
+        )
+        return decision
+
+    def orchestrate_delegation(
+        self,
+        *,
+        parent_agent_id: str,
+        tasks: list[DelegationTask],
+        task_analysis: TaskAnalysisInputs,
+    ) -> DelegationExecutionPlan:
+        """Spawns children according to selected mode (fan-out, pipeline, or hybrid)."""
+
+        if not tasks:
+            return DelegationExecutionPlan(mode=ExecutionMode.SEQUENTIAL, stages=[])
+
+        decision = self.select_execution_mode(parent_agent_id=parent_agent_id, task_analysis=task_analysis)
+        if decision.mode is ExecutionMode.PARALLEL:
+            return self._execute_parallel(parent_agent_id=parent_agent_id, tasks=tasks)
+        if decision.mode is ExecutionMode.SEQUENTIAL:
+            return self._execute_sequential(parent_agent_id=parent_agent_id, tasks=tasks)
+        return self._execute_hybrid(parent_agent_id=parent_agent_id, tasks=tasks)
+
+    def _execute_parallel(self, *, parent_agent_id: str, tasks: list[DelegationTask]) -> DelegationExecutionPlan:
+        stage: list[str] = []
+        for task in tasks:
+            child_id = self.spawn_agent(
+                parent_agent_id=parent_agent_id,
+                role=task.role,
+                objective=task.objective,
+                constraints=task.constraints,
+                max_tool_calls=task.max_tool_calls,
+                max_runtime_sec=task.max_runtime_sec,
+            )
+            stage.append(child_id)
+        return DelegationExecutionPlan(mode=ExecutionMode.PARALLEL, stages=[stage])
+
+    def _execute_sequential(self, *, parent_agent_id: str, tasks: list[DelegationTask]) -> DelegationExecutionPlan:
+        ordered = self._topological_order(tasks)
+        stages: list[list[str]] = []
+        for task in ordered:
+            child_id = self.spawn_agent(
+                parent_agent_id=parent_agent_id,
+                role=task.role,
+                objective=task.objective,
+                constraints=task.constraints,
+                max_tool_calls=task.max_tool_calls,
+                max_runtime_sec=task.max_runtime_sec,
+            )
+            stages.append([child_id])
+        return DelegationExecutionPlan(mode=ExecutionMode.SEQUENTIAL, stages=stages)
+
+    def _execute_hybrid(self, *, parent_agent_id: str, tasks: list[DelegationTask]) -> DelegationExecutionPlan:
+        by_id = {task.task_id: task for task in tasks}
+        root_tasks = [task for task in tasks if not task.dependencies]
+        if not root_tasks:
+            return self._execute_sequential(parent_agent_id=parent_agent_id, tasks=tasks)
+
+        first_stage: list[str] = []
+        spawned = set()
+        for task in root_tasks:
+            child_id = self.spawn_agent(
+                parent_agent_id=parent_agent_id,
+                role=task.role,
+                objective=task.objective,
+                constraints=task.constraints,
+                max_tool_calls=task.max_tool_calls,
+                max_runtime_sec=task.max_runtime_sec,
+            )
+            first_stage.append(child_id)
+            spawned.add(task.task_id)
+
+        remaining = [by_id[task_id] for task_id in by_id if task_id not in spawned]
+        sequential_tail = self._execute_sequential(parent_agent_id=parent_agent_id, tasks=remaining)
+        return DelegationExecutionPlan(mode=ExecutionMode.HYBRID, stages=[first_stage, *sequential_tail.stages])
+
+    def _topological_order(self, tasks: list[DelegationTask]) -> list[DelegationTask]:
+        by_id = {task.task_id: task for task in tasks}
+        unresolved = set(by_id.keys())
+        resolved: set[str] = set()
+        order: list[DelegationTask] = []
+
+        while unresolved:
+            progressed = False
+            for task_id in list(unresolved):
+                task = by_id[task_id]
+                deps = [dep for dep in task.dependencies if dep in by_id]
+                if all(dep in resolved for dep in deps):
+                    order.append(task)
+                    resolved.add(task_id)
+                    unresolved.remove(task_id)
+                    progressed = True
+            if not progressed:
+                cyclic = sorted(unresolved)
+                raise AgentRuntimeError(f"cyclic dependency detected across tasks: {', '.join(cyclic)}")
+        return order
 
     def record_tool_call(self, *, agent_id: str) -> None:
         """Consumes a single tool-call quota after validating runtime limits."""
