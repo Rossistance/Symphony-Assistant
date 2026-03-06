@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Symphony Assistant Env Builder</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 24px; max-width: 960px; }
+      h1 { margin-bottom: 0.25rem; }
+      p.muted { color: #666; margin-top: 0; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      label { display: block; font-weight: 700; margin-bottom: 4px; }
+      input, select, textarea { width: 100%; padding: 8px; box-sizing: border-box; }
+      textarea { min-height: 280px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .row { margin-bottom: 12px; }
+      .actions { display: flex; gap: 10px; margin-top: 10px; }
+      button { padding: 8px 14px; cursor: pointer; }
+      .full { grid-column: 1 / -1; }
+      .hint { font-size: 0.9rem; color: #444; }
+    </style>
+  </head>
+  <body>
+    <h1>Symphony Assistant .env Builder</h1>
+    <p class="muted">Fill this form, copy the output, and paste into your <code>.env</code> file.</p>
+
+    <div class="grid">
+      <div class="row">
+        <label for="default_channel">DEFAULT_CHANNEL</label>
+        <select id="default_channel">
+          <option value="whatsapp" selected>whatsapp</option>
+          <option value="sms">sms</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label for="enable_sms_fallback">ENABLE_SMS_FALLBACK</label>
+        <select id="enable_sms_fallback">
+          <option value="true" selected>true</option>
+          <option value="false">false</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label for="enable_ios_bridge">ENABLE_IOS_BRIDGE</label>
+        <select id="enable_ios_bridge">
+          <option value="false" selected>false</option>
+          <option value="true">true</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label for="model_router_order">MODEL_ROUTER_ORDER</label>
+        <input id="model_router_order" value="groq,openai,gemini,anthropic" />
+      </div>
+
+      <div class="row">
+        <label for="model_provider_max_retries">MODEL_PROVIDER_MAX_RETRIES</label>
+        <input id="model_provider_max_retries" value="2" />
+      </div>
+
+      <div class="row full">
+        <label for="slow_mode_trigger_phrases">SLOW_MODE_TRIGGER_PHRASES (pipe-delimited)</label>
+        <input id="slow_mode_trigger_phrases" value="this is a hard problem|let's take it slow|let’s take it slow|lets take it slow" />
+      </div>
+
+      <div class="row">
+        <label for="groq_api_key">GROQ_API_KEY</label>
+        <input id="groq_api_key" placeholder="gsk_..." />
+      </div>
+
+      <div class="row">
+        <label for="openai_api_key">OPENAI_API_KEY (optional fallback)</label>
+        <input id="openai_api_key" placeholder="sk-..." />
+      </div>
+
+      <div class="row">
+        <label for="gemini_api_key">GEMINI_API_KEY (optional fallback)</label>
+        <input id="gemini_api_key" placeholder="..." />
+      </div>
+
+      <div class="row">
+        <label for="anthropic_api_key">ANTHROPIC_API_KEY (optional fallback)</label>
+        <input id="anthropic_api_key" placeholder="sk-ant-..." />
+      </div>
+
+      <div class="row full">
+        <label for="env_output">Generated .env</label>
+        <textarea id="env_output" readonly></textarea>
+        <div class="hint">Tip: Keep this file secret and never commit it.</div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="generate">Generate</button>
+      <button id="copy">Copy to Clipboard</button>
+      <button id="clear">Clear API keys</button>
+    </div>
+
+    <script>
+      function val(id) {
+        return document.getElementById(id).value.trim();
+      }
+
+      function buildEnv() {
+        const lines = [
+          `DEFAULT_CHANNEL=${val('default_channel') || 'whatsapp'}`,
+          `ENABLE_SMS_FALLBACK=${val('enable_sms_fallback') || 'true'}`,
+          `ENABLE_IOS_BRIDGE=${val('enable_ios_bridge') || 'false'}`,
+          `MODEL_ROUTER_ORDER=${val('model_router_order') || 'groq,openai,gemini,anthropic'}`,
+          `MODEL_PROVIDER_MAX_RETRIES=${val('model_provider_max_retries') || '2'}`,
+          `SLOW_MODE_TRIGGER_PHRASES=${val('slow_mode_trigger_phrases') || "this is a hard problem|let's take it slow|let’s take it slow|lets take it slow"}`,
+        ];
+
+        const optionalKeys = ['groq_api_key', 'openai_api_key', 'gemini_api_key', 'anthropic_api_key'];
+        for (const keyId of optionalKeys) {
+          const raw = val(keyId);
+          if (!raw) continue;
+          const envName = keyId.toUpperCase();
+          lines.push(`${envName}=${raw}`);
+        }
+
+        document.getElementById('env_output').value = lines.join('\n') + '\n';
+      }
+
+      document.getElementById('generate').addEventListener('click', buildEnv);
+      document.getElementById('copy').addEventListener('click', async () => {
+        const out = document.getElementById('env_output').value;
+        if (!out) buildEnv();
+        try {
+          await navigator.clipboard.writeText(document.getElementById('env_output').value);
+          alert('Copied to clipboard');
+        } catch {
+          alert('Clipboard copy failed; please copy manually.');
+        }
+      });
+      document.getElementById('clear').addEventListener('click', () => {
+        ['groq_api_key', 'openai_api_key', 'gemini_api_key', 'anthropic_api_key'].forEach((id) => {
+          document.getElementById(id).value = '';
+        });
+        buildEnv();
+      });
+
+      buildEnv();
+    </script>
+  </body>
+</html>
