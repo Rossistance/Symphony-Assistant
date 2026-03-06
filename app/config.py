@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 def _as_bool(name: str, default: bool) -> bool:
@@ -11,6 +11,11 @@ def _as_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _as_pipe_delimited_tuple(name: str, default: str) -> tuple[str, ...]:
+    raw = os.getenv(name, default)
+    return tuple(item.strip() for item in raw.split("|") if item.strip())
 
 
 @dataclass(frozen=True)
@@ -34,5 +39,18 @@ class ModelRouterConfig:
     max_retries: int = int(os.getenv("MODEL_PROVIDER_MAX_RETRIES", "2"))
 
 
+@dataclass(frozen=True)
+class OrchestratorConfig:
+    """Policy controls for lead-agent autonomy and slow-mode handling."""
+
+    slow_mode_trigger_phrases: tuple[str, ...] = field(
+        default_factory=lambda: _as_pipe_delimited_tuple(
+            "SLOW_MODE_TRIGGER_PHRASES",
+            "this is a hard problem|let's take it slow|let’s take it slow|lets take it slow",
+        )
+    )
+
+
 config = MessagingConfig()
 model_config = ModelRouterConfig()
+orchestrator_config = OrchestratorConfig()

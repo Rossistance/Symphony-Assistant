@@ -10,6 +10,7 @@ from app.services.agent_runtime import (
     DelegationTask,
     ExecutionMode,
 )
+from app.services.orchestration_policy import ExecutionMode
 
 
 class FakeClock:
