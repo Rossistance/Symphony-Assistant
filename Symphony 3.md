@@ -208,7 +208,7 @@ Implement workflow:
 1. Worker/subagent writes deliverable artifact (`report.md`, `analysis.pdf`, `code.zip`) to Drive-backed store.
 2. Executor sets sharing policy and creates per-file `share_url`.
 3. Messaging adapter responds in original thread with structured summary and links.
-4. Event log records `deliverable_published` and `message_dispatched`.
+4. Event log records `deliverable.published` and `message.reply.sent`.
 
 Suggested message template:
 
@@ -223,6 +223,137 @@ If you want, I can now run a critique pass and produce a shorter executive summa
 ```
 
 ---
+
+
+## 5.1 Deliverables publisher utility/service (implementation contract)
+
+Create a dedicated service, e.g. `DeliverablePublisher`, responsible for taking generated artifacts and publishing them to Drive-backed storage.
+
+### Service responsibilities
+
+1. Accept one or more generated artifacts from workers/orchestrator (`name`, `local_path|bytes`, `mime_type`, `task_id`, optional metadata).
+2. Upload/save each artifact into Drive-backed storage and persist internal mapping (`artifact_id -> drive_file_id`).
+3. Apply share policy per file:
+   - `private` (owner-only),
+   - `view-only` (link-reader, no edit),
+   - optional `expires_at` for time-bound access (if provider supports expiry).
+4. Return canonical metadata for downstream messaging and audit:
+   - `drive_file_id`,
+   - `share_url`,
+   - `mime_type`.
+
+### Suggested interface
+
+```ts
+publishDeliverables({
+  taskId,
+  runId,
+  correlationId,
+  replyToMessageId,
+  artifacts,
+  sharePolicy
+}) => {
+  task_id,
+  reply_to_message_id,
+  deliverables: Array<{
+    artifact_id,
+    title,
+    drive_file_id,
+    share_url,
+    mime_type
+  }>,
+  status
+}
+```
+
+### Share policy schema
+
+```json
+{
+  "visibility": "private | view-only",
+  "expires_at": "2026-12-31T23:59:59Z"
+}
+```
+
+`expires_at` is optional; when unsupported by the backend, record capability downgrade in event metadata and keep policy as close as possible.
+
+## 5.2 Delivery payload contract (required)
+
+Use this payload for orchestration -> messaging adapter handoff:
+
+```json
+{
+  "reply_to_message_id": "provider-message-id",
+  "task_id": "uuid",
+  "deliverables": [
+    {
+      "artifact_id": "uuid",
+      "title": "Competitor Analysis",
+      "drive_file_id": "1AbC...",
+      "share_url": "https://drive.google.com/...",
+      "mime_type": "application/pdf"
+    }
+  ],
+  "status": "completed"
+}
+```
+
+Status should be constrained to: `completed | partial | failed`.
+
+## 5.3 Messaging adapter thread reply wiring
+
+Require the messaging adapter to reply back to the same thread/channel that initiated the task.
+
+Routing keys that must be carried end-to-end:
+- `channel` (e.g., whatsapp, ios_bridge, sms),
+- `conversation_id`/`thread_id`,
+- `reply_to_message_id`,
+- `task_id`.
+
+Outbound message should be concise:
+1. One-line completion summary (`Done — completed <task title>.`).
+2. Bullet/numbered link list from `deliverables[].share_url`.
+3. Optional call-to-action line (`Reply "summarize" for executive summary.`).
+
+## 5.4 Structured events for publish + dispatch
+
+Emit structured events with task/run correlation IDs for observability and replay.
+
+### `deliverable.published`
+
+```json
+{
+  "event": "deliverable.published",
+  "timestamp": "2026-03-06T21:00:00Z",
+  "task_id": "uuid",
+  "run_id": "uuid",
+  "correlation_id": "uuid",
+  "channel": "whatsapp",
+  "artifact_id": "uuid",
+  "drive_file_id": "1AbC...",
+  "share_url": "https://drive.google.com/...",
+  "mime_type": "application/pdf",
+  "share_policy": {"visibility": "view-only", "expires_at": null}
+}
+```
+
+### `message.reply.sent`
+
+```json
+{
+  "event": "message.reply.sent",
+  "timestamp": "2026-03-06T21:00:02Z",
+  "task_id": "uuid",
+  "run_id": "uuid",
+  "correlation_id": "uuid",
+  "channel": "whatsapp",
+  "thread_id": "abc-thread",
+  "reply_to_message_id": "wamid.HBg...",
+  "message_id": "wamid.HBg...reply",
+  "status": "completed",
+  "deliverable_count": 2
+}
+```
 
 ## 6) API + config changes you should implement now
 
