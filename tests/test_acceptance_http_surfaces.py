@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+import unittest
+
+from app.api.approvals import DECISION_ROUTE, post_approval_decision
+from app.api.http_surfaces import (
+    DAILY_SUGGESTION_ROUTE,
+    ORCHESTRATE_JOB_ROUTE,
+    TASK_DETAILS_ROUTE,
+    WHATSAPP_WEBHOOK_ROUTE,
+    HttpSurfaceHandlers,
+    TaskStore,
+)
+from app.messaging.agent_bus import AgentMessageBroker
+from app.services.agent_runtime import AgentRuntime
+from app.services.model_routing import ModelResponse, RoutedModelClient, TransientProviderError
+from app.services.policy_engine import ActionPolicyEngine, ActionRequest
+
+
+class FakeProvider:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def generate(self, *, model: str, prompt: str) -> ModelResponse:
+        self.calls += 1
+        result = self.outcomes.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class AcceptanceHttpSurfaceTests(unittest.TestCase):
+    def setUp(self):
+        self.handlers = HttpSurfaceHandlers(
+            runtime=AgentRuntime(clock=lambda: 0),
+            message_bus=AgentMessageBroker(),
+            tasks=TaskStore.create(),
+        )
+
+    def test_contract_routes_exist(self):
+        self.assertEqual(WHATSAPP_WEBHOOK_ROUTE, "/webhooks/whatsapp")
+        self.assertEqual(ORCHESTRATE_JOB_ROUTE, "/jobs/orchestrate")
+        self.assertEqual(DAILY_SUGGESTION_ROUTE, "/jobs/daily-suggestion")
+        self.assertEqual(TASK_DETAILS_ROUTE, "/api/v1/tasks/:id")
+        self.assertEqual(DECISION_ROUTE, "/api/v1/approvals/:id/decision")
+
+    def test_deliverable_return_and_task_lookup(self):
+        response = self.handlers.post_jobs_orchestrate(
+            {
+                "task_id": "task-deliverable",
+                "prompt": "draft release summary",
+                "deliverable": "Release summary v1",
+                "subtasks": [],
+            }
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.body["deliverable"], "Release summary v1")
+
+        lookup = self.handlers.get_api_v1_tasks_id("task-deliverable")
+        self.assertEqual(lookup.status_code, 200)
+        self.assertEqual(lookup.body["task_id"], "task-deliverable")
+
+    def test_swarm_spawn_and_message_synthesis_events(self):
+        response = self.handlers.post_jobs_orchestrate(
+            {
+                "task_id": "task-swarm",
+                "prompt": "coordinate research",
+                "subtasks": [
+                    {"task_id": "a", "objective": "collect docs", "dependencies": []},
+                    {"task_id": "b", "objective": "summarize docs", "dependencies": ["a"]},
+                ],
+            }
+        )
+
+        self.assertEqual(response.status_code, 200)
+        runtime_events = [event.event_type for event in self.handlers.runtime.events]
+        self.assertIn("agent.spawned", runtime_events)
+        self.assertIn("execution.mode.selected", runtime_events)
+
+        event_types = [event["event_type"] for event in self.handlers.events]
+        self.assertIn("agent.message.sent", event_types)
+        self.assertIn("deliverable.published", event_types)
+        self.assertIn("task.analysis.completed", event_types)
+
+    def test_mode_selection_by_dependency_profile_and_slow_mode_trigger(self):
+        response = self.handlers.post_jobs_orchestrate(
+            {
+                "task_id": "task-mode",
+                "prompt": "this is a hard problem; let's take it slow",
+                "dependency_graph_density": 0.8,
+                "decomposition_count_estimate": 3,
+                "subtasks": [{"task_id": "a", "objective": "step"}],
+            }
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.body["execution_mode"], "slow")
+        self.assertEqual(response.body["delegation_mode"], "SEQUENTIAL")
+
+    def test_whatsapp_webhook_surface(self):
+        response = self.handlers.post_webhooks_whatsapp({"MessageSid": "SM1", "From": "+1555", "Body": "Hi"})
+
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.body["accepted"])
+        self.assertEqual(self.handlers.events[-1]["event_type"], "message.reply.sent")
+
+    def test_daily_suggestion_surface(self):
+        response = self.handlers.post_jobs_daily_suggestion({"user": "alex"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("deliverable", response.body)
+
+
+class AcceptanceProviderRoutingTests(unittest.TestCase):
+    def test_groq_precedence(self):
+        groq = FakeProvider([ModelResponse("groq result", 10, 5, 0.001)])
+        openai = FakeProvider([ModelResponse("openai result", 10, 5, 0.002)])
+        client = RoutedModelClient(providers={"groq": groq, "openai": openai}, fallback_map={"groq": "openai"})
+
+        result = client.generate(model="llama", prompt="hi", provider="groq")
+
+        self.assertEqual(result.output_text, "groq result")
+        self.assertEqual(groq.calls, 1)
+        self.assertEqual(openai.calls, 0)
+
+    def test_groq_timeout_fallback(self):
+        groq = FakeProvider([TransientProviderError("timeout"), TransientProviderError("timeout")])
+        openai = FakeProvider([ModelResponse("fallback", 8, 4, 0.001)])
+        client = RoutedModelClient(
+            providers={"groq": groq, "openai": openai},
+            fallback_map={"groq": "openai"},
+            max_attempts=2,
+            sleep_fn=lambda _: None,
+        )
+
+        result = client.generate(model="llama", prompt="hi", provider="groq")
+
+        self.assertEqual(result.output_text, "fallback")
+        self.assertEqual(groq.calls, 2)
+        self.assertEqual(openai.calls, 1)
+        self.assertIn("provider.route.fallback", [event.event_type for event in client.events])
+
+
+class AcceptanceApprovalDecisionTests(unittest.TestCase):
+    def test_approval_decision_endpoint(self):
+        engine = ActionPolicyEngine()
+        enforcement = engine.enforce(ActionRequest(action_id="act-1", action_type="credential_change", description="rotate"))
+
+        response = post_approval_decision(
+            approval_id=enforcement.approval_id or "",
+            payload={"actor": "ops", "decision": "approved"},
+            policy_engine=engine,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.body["status"], "approved")
+
+
+if __name__ == "__main__":
+    unittest.main()
