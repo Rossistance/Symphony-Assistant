@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
+
+from app.services.orchestration_policy import ExecutionMode, policy_for_mode
 
 
 class AgentRuntimeError(RuntimeError):
@@ -47,6 +49,7 @@ class AgentContext:
     max_tool_calls: int
     max_runtime_sec: int
     started_at: float
+    execution_mode: ExecutionMode = ExecutionMode.DEFAULT
 
 
 @dataclass
@@ -56,6 +59,7 @@ class AgentState:
     context: AgentContext
     tool_calls_used: int = 0
     completed: bool = False
+    high_impact_verification_checks: int = 0
 
 
 @dataclass
@@ -91,6 +95,7 @@ class AgentRuntime:
         safety_scope: dict[str, Any],
         max_tool_calls: int,
         max_runtime_sec: int,
+        execution_mode: ExecutionMode = ExecutionMode.DEFAULT,
     ) -> str:
         """Registers a lead/root agent that can spawn child workers."""
 
@@ -106,6 +111,7 @@ class AgentRuntime:
             max_tool_calls=max_tool_calls,
             max_runtime_sec=max_runtime_sec,
             started_at=self.clock(),
+            execution_mode=execution_mode,
         )
         self._agents[agent_id] = AgentState(context=context)
         return agent_id
@@ -143,6 +149,7 @@ class AgentRuntime:
             max_tool_calls=max_tool_calls,
             max_runtime_sec=max_runtime_sec,
             started_at=self.clock(),
+            execution_mode=parent.context.execution_mode,
         )
         self._agents[child_agent_id] = AgentState(context=context)
         self._child_outputs[child_agent_id] = ChildOutputRecord(
@@ -195,6 +202,20 @@ class AgentRuntime:
             raise ChildSynthesisRequiredError("cannot synthesize before child output is submitted")
 
         record.synthesized_output = synthesized_output
+
+    def record_high_impact_checkpoint(self, *, agent_id: str) -> None:
+        """Records a verification checkpoint before a high-impact action."""
+
+        state = self._get_agent(agent_id)
+        self._assert_within_limits(state)
+        state.high_impact_verification_checks += 1
+
+    def can_execute_high_impact_action(self, *, agent_id: str) -> bool:
+        """Returns whether high-impact actions satisfy current mode verification depth."""
+
+        state = self._get_agent(agent_id)
+        required = policy_for_mode(state.context.execution_mode).high_impact_verification_depth
+        return state.high_impact_verification_checks >= required
 
     def get_child_result(self, *, child_agent_id: str) -> str:
         """Returns only parent-synthesized child output."""

@@ -7,6 +7,7 @@ from app.services.agent_runtime import (
     AgentRuntime,
     ChildSynthesisRequiredError,
 )
+from app.services.orchestration_policy import ExecutionMode
 
 
 class FakeClock:
@@ -138,6 +139,46 @@ class AgentRuntimeTests(unittest.TestCase):
             synthesized_output="parent-approved synthesis",
         )
         self.assertEqual(runtime.get_child_result(child_agent_id=child_id), "parent-approved synthesis")
+
+    def test_slow_mode_requires_additional_high_impact_verification(self):
+        runtime = AgentRuntime(clock=FakeClock())
+        runtime.register_lead_agent(
+            agent_id="lead",
+            role="lead",
+            objective="Coordinate",
+            constraints=["safe"],
+            output_contract="summary",
+            correlation_id="corr",
+            safety_scope={"tenant_id": "t1"},
+            max_tool_calls=3,
+            max_runtime_sec=60,
+            execution_mode=ExecutionMode.SLOW,
+        )
+
+        self.assertFalse(runtime.can_execute_high_impact_action(agent_id="lead"))
+        runtime.record_high_impact_checkpoint(agent_id="lead")
+        self.assertFalse(runtime.can_execute_high_impact_action(agent_id="lead"))
+        runtime.record_high_impact_checkpoint(agent_id="lead")
+        self.assertTrue(runtime.can_execute_high_impact_action(agent_id="lead"))
+
+    def test_default_mode_keeps_single_checkpoint_for_high_impact_actions(self):
+        runtime = AgentRuntime(clock=FakeClock())
+        runtime.register_lead_agent(
+            agent_id="lead",
+            role="lead",
+            objective="Coordinate",
+            constraints=["safe"],
+            output_contract="summary",
+            correlation_id="corr",
+            safety_scope={"tenant_id": "t1"},
+            max_tool_calls=3,
+            max_runtime_sec=60,
+        )
+
+        self.assertFalse(runtime.can_execute_high_impact_action(agent_id="lead"))
+        runtime.record_high_impact_checkpoint(agent_id="lead")
+        self.assertTrue(runtime.can_execute_high_impact_action(agent_id="lead"))
+
 
 
 if __name__ == "__main__":
