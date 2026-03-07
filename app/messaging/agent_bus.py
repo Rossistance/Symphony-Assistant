@@ -45,6 +45,17 @@ class AgentMessageBroker:
     _processed_by_agent: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
     events: list[AgentMessageEvent] = field(default_factory=list)
 
+    @staticmethod
+    def _stable_message_id(message_id: str | None) -> str:
+        """Create a canonical identifier used for deduplication."""
+
+        if message_id is None:
+            return str(uuid4())
+        normalized = message_id.strip()
+        if not normalized:
+            return str(uuid4())
+        return normalized
+
     def send_agent_message(
         self,
         from_agent: str,
@@ -57,8 +68,9 @@ class AgentMessageBroker:
     ) -> AgentMessage:
         """Queue a message with compact payload references and trace metadata."""
 
+        stable_message_id = self._stable_message_id(message_id)
         envelope = AgentMessage(
-            message_id=message_id or str(uuid4()),
+            message_id=stable_message_id,
             correlation_id=correlation_id or str(uuid4()),
             from_agent=from_agent,
             to_agent=to_agent,
@@ -96,11 +108,13 @@ class AgentMessageBroker:
         """
 
         deliveries: list[AgentMessage] = []
+        processed_ids = self._processed_by_agent[agent_id]
         for queued in self._inboxes[agent_id]:
             if queued.acknowledged:
                 continue
             msg = queued.message
-            if idempotent and msg.message_id in self._processed_by_agent[agent_id]:
+            if idempotent and msg.message_id in processed_ids:
+                queued.acknowledged = True
                 continue
             attempt_msg = AgentMessage(
                 message_id=msg.message_id,
@@ -115,7 +129,7 @@ class AgentMessageBroker:
             deliveries.append(attempt_msg)
             if auto_ack:
                 queued.acknowledged = True
-                self._processed_by_agent[agent_id].add(msg.message_id)
+                processed_ids.add(msg.message_id)
 
         return deliveries
 
@@ -129,11 +143,13 @@ class AgentMessageBroker:
         """Handle all deliverable messages for an agent and acknowledge on success."""
 
         handled = 0
+        processed_ids = self._processed_by_agent[agent_id]
         for queued in self._inboxes[agent_id]:
             if queued.acknowledged:
                 continue
             msg = queued.message
-            if idempotent and msg.message_id in self._processed_by_agent[agent_id]:
+            if idempotent and msg.message_id in processed_ids:
+                queued.acknowledged = True
                 continue
             next_msg = AgentMessage(
                 message_id=msg.message_id,
@@ -147,7 +163,7 @@ class AgentMessageBroker:
             queued.message = next_msg
             handler(next_msg)
             queued.acknowledged = True
-            self._processed_by_agent[agent_id].add(next_msg.message_id)
+            processed_ids.add(next_msg.message_id)
             handled += 1
 
         return handled
@@ -155,10 +171,11 @@ class AgentMessageBroker:
     def acknowledge_message(self, agent_id: str, message_id: str) -> bool:
         """Acknowledge one message explicitly."""
 
+        stable_message_id = self._stable_message_id(message_id)
         for queued in self._inboxes[agent_id]:
-            if queued.message.message_id != message_id:
+            if queued.message.message_id != stable_message_id:
                 continue
             queued.acknowledged = True
-            self._processed_by_agent[agent_id].add(message_id)
+            self._processed_by_agent[agent_id].add(stable_message_id)
             return True
         return False

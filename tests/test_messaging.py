@@ -35,6 +35,18 @@ class MessagingRouterTests(unittest.TestCase):
 
 
 class WebhookParserTests(unittest.TestCase):
+    def test_provider_message_id_is_trimmed_for_stable_dedup_key(self):
+        payload = {
+            "message_id": "  msg-42  ",
+            "conversation_id": " conv-9 ",
+            "from": " +1555 ",
+            "body": " hello ",
+        }
+        inbound = parse_inbound_webhook(payload, channel="sms")
+        self.assertEqual(inbound.provider_message_id, "msg-42")
+        self.assertEqual(inbound.provider_thread_id, "conv-9")
+        self.assertEqual(inbound.metadata["stable_provider_id"], "msg-42")
+
     def test_preserves_provider_ids(self):
         payload = {
             "MessageSid": "SM123",
