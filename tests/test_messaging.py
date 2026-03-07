@@ -1,10 +1,26 @@
 import os
 import unittest
+from dataclasses import dataclass, field
+from typing import Any
 
 from app.config import MessagingConfig
+from app.messaging.adapters.whatsapp import WhatsAppCloudAdapter
 from app.messaging.base import InboundMessage
 from app.messaging.router import MessagingRouter
 from app.webhooks.inbound import parse_inbound_webhook
+
+
+@dataclass
+class FakeGatewayClient:
+    session_id: str | None = "session-test"
+    responses: list[dict[str, Any]] = field(default_factory=list)
+    sent_payloads: list[dict[str, Any]] = field(default_factory=list)
+
+    def send(self, *, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.sent_payloads.append({"session_id": session_id, **payload})
+        if self.responses:
+            return self.responses.pop(0)
+        return {"message_id": "wamid.default", "thread_id": payload.get("thread_id")}
 
 
 class MessagingRouterTests(unittest.TestCase):
@@ -20,8 +36,10 @@ class MessagingRouterTests(unittest.TestCase):
         self.assertTrue(result.provider_message_id.startswith("sms-"))
 
     def test_reply_uses_original_thread(self):
+        gateway = FakeGatewayClient(responses=[{"message_id": "wamid.2", "thread_id": "thread.123"}])
         router = MessagingRouter(
-            MessagingConfig(default_channel="whatsapp", enable_sms_fallback=True, enable_ios_bridge=False)
+            MessagingConfig(default_channel="whatsapp", enable_sms_fallback=True, enable_ios_bridge=False),
+            adapters={"whatsapp": WhatsAppCloudAdapter(gateway_client=gateway)},
         )
         inbound = InboundMessage(
             channel="whatsapp",
@@ -32,6 +50,19 @@ class MessagingRouterTests(unittest.TestCase):
         )
         reply = router.reply_in_thread(inbound, "pong")
         self.assertEqual(reply.provider_thread_id, "thread.123")
+        self.assertEqual(gateway.sent_payloads[0]["in_reply_to"], "wamid.1")
+
+    def test_whatsapp_adapter_uses_provider_ids_from_gateway_response(self):
+        gateway = FakeGatewayClient(
+            responses=[{"provider_message_id": "provider-5", "provider_thread_id": "conv-7", "status": "queued"}]
+        )
+        adapter = WhatsAppCloudAdapter(gateway_client=gateway)
+
+        result = adapter.send_message("+1555", "hello", thread_id="conv-1")
+
+        self.assertEqual(result.provider_message_id, "provider-5")
+        self.assertEqual(result.provider_thread_id, "conv-7")
+        self.assertEqual(result.raw_response, {"provider_message_id": "provider-5", "provider_thread_id": "conv-7", "status": "queued"})
 
 
 class WebhookParserTests(unittest.TestCase):

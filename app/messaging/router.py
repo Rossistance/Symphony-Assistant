@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.config import MessagingConfig, config
 from app.messaging.adapters.ios_bridge import IOSBridgeAdapter
@@ -16,14 +16,17 @@ class MessagingRouter:
     """Selects a messaging adapter using channel + fallback rules."""
 
     settings: MessagingConfig = config
+    adapters: dict[str, MessagingTransport] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self._adapters: dict[str, MessagingTransport] = {
+        default_adapters: dict[str, MessagingTransport] = {
             "whatsapp": WhatsAppCloudAdapter(),
             "sms": SmsAdapter(),
         }
         if self.settings.enable_ios_bridge:
-            self._adapters["ios"] = IOSBridgeAdapter()
+            default_adapters["ios"] = IOSBridgeAdapter()
+
+        self._adapters: dict[str, MessagingTransport] = {**default_adapters, **self.adapters}
 
     def _get_adapter(self, channel: str | None) -> MessagingTransport:
         preferred = channel or self.settings.default_channel
