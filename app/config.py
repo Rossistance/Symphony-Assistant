@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 def _as_bool(name: str, default: bool) -> bool:
@@ -41,12 +43,108 @@ class ModelRouterConfig:
 
 
 @dataclass(frozen=True)
+class DeliverablesStorageConfig:
+    """Storage-specific settings for deliverable publication backends."""
+
+    backend: str = os.getenv("DELIVERABLES_BACKEND", "in_memory").strip().lower()
+    credentials_json: str = os.getenv("GOOGLE_DRIVE_CREDENTIALS_JSON", "")
+    credentials_path: str = os.getenv("GOOGLE_DRIVE_CREDENTIALS_PATH", "")
+    delegated_subject: str | None = (os.getenv("GOOGLE_DRIVE_DELEGATED_SUBJECT", "").strip() or None)
+    use_shared_drive: bool = _as_bool("GOOGLE_DRIVE_USE_SHARED_DRIVE", False)
+    drive_id: str | None = (os.getenv("GOOGLE_DRIVE_DRIVE_ID", "").strip() or None)
+
+    @classmethod
+    def from_env(cls, *, backend: str | None = None) -> "DeliverablesStorageConfig":
+        return cls(
+            backend=(backend if backend is not None else os.getenv("DELIVERABLES_BACKEND", "in_memory")).strip().lower(),
+            credentials_json=os.getenv("GOOGLE_DRIVE_CREDENTIALS_JSON", ""),
+            credentials_path=os.getenv("GOOGLE_DRIVE_CREDENTIALS_PATH", ""),
+            delegated_subject=(os.getenv("GOOGLE_DRIVE_DELEGATED_SUBJECT", "").strip() or None),
+            use_shared_drive=_as_bool("GOOGLE_DRIVE_USE_SHARED_DRIVE", False),
+            drive_id=(os.getenv("GOOGLE_DRIVE_DRIVE_ID", "").strip() or None),
+        )
+
+    @property
+    def credential_source(self) -> str:
+        """Return selected source with deterministic precedence JSON > PATH > NONE."""
+
+        if self.credentials_json.strip():
+            return "GOOGLE_DRIVE_CREDENTIALS_JSON"
+        if self.credentials_path.strip():
+            return "GOOGLE_DRIVE_CREDENTIALS_PATH"
+        return "none"
+
+    def validate(self) -> None:
+        """Fail fast on unsupported backend or malformed Google Drive settings."""
+
+        if self.backend not in {"in_memory", "google_drive"}:
+            raise ValueError("DELIVERABLES_BACKEND must be one of: in_memory, google_drive")
+        if self.backend != "google_drive":
+            return
+
+        if self.credential_source == "none":
+            raise ValueError(
+                "google_drive backend requires GOOGLE_DRIVE_CREDENTIALS_JSON or GOOGLE_DRIVE_CREDENTIALS_PATH"
+            )
+
+        if self.credential_source == "GOOGLE_DRIVE_CREDENTIALS_PATH":
+            credentials_path = Path(self.credentials_path.strip())
+            if not credentials_path.exists() or not credentials_path.is_file():
+                raise ValueError("GOOGLE_DRIVE_CREDENTIALS_PATH must point to an existing file")
+
+        if self.credential_source == "GOOGLE_DRIVE_CREDENTIALS_JSON":
+            self._validate_credentials_json(self.credentials_json)
+
+        if self.use_shared_drive and not self.drive_id:
+            raise ValueError("GOOGLE_DRIVE_DRIVE_ID is required when GOOGLE_DRIVE_USE_SHARED_DRIVE is enabled")
+
+    def resolve_credentials_json(self) -> str:
+        """Return normalized credentials JSON according to source precedence."""
+
+        if self.credential_source == "GOOGLE_DRIVE_CREDENTIALS_JSON":
+            raw = self.credentials_json
+        elif self.credential_source == "GOOGLE_DRIVE_CREDENTIALS_PATH":
+            raw = Path(self.credentials_path.strip()).read_text(encoding="utf-8")
+        else:
+            raise ValueError("No Google Drive credential source configured")
+
+        self._validate_credentials_json(raw)
+        return raw
+
+    @staticmethod
+    def _validate_credentials_json(raw_credentials: str) -> None:
+        try:
+            payload = json.loads(raw_credentials)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Google Drive credentials payload must be valid JSON") from exc
+        if not isinstance(payload, dict) or not payload.get("client_email"):
+            raise ValueError("Google Drive credentials JSON must include client_email")
+
+
+@dataclass(frozen=True)
 class DeliverablesConfig:
     """Configuration for deliverable publication backend selection."""
 
-    backend: str = os.getenv("DELIVERABLES_BACKEND", "in_memory")
+    backend: str = os.getenv("DELIVERABLES_BACKEND", "in_memory").strip().lower()
     in_memory_drive_root: str = os.getenv("DELIVERABLES_IN_MEMORY_DRIVE_ROOT", "https://drive.example/files")
     google_drive_folder_id: str = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+    storage: DeliverablesStorageConfig = field(default_factory=DeliverablesStorageConfig)
+
+    def __post_init__(self) -> None:
+        if self.storage.backend != self.backend:
+            object.__setattr__(self, "storage", DeliverablesStorageConfig(backend=self.backend))
+
+    @classmethod
+    def from_env(cls) -> "DeliverablesConfig":
+        config = cls(
+            backend=os.getenv("DELIVERABLES_BACKEND", "in_memory").strip().lower(),
+            in_memory_drive_root=os.getenv("DELIVERABLES_IN_MEMORY_DRIVE_ROOT", "https://drive.example/files"),
+            google_drive_folder_id=os.getenv("GOOGLE_DRIVE_FOLDER_ID", ""),
+            storage=DeliverablesStorageConfig.from_env(backend=os.getenv("DELIVERABLES_BACKEND", "in_memory")),
+        )
+        config.storage.validate()
+        return config
+
 
 @dataclass(frozen=True)
 class OrchestratorConfig:
@@ -64,4 +162,4 @@ config = MessagingConfig()
 model_config = ModelRouterConfig()
 orchestrator_config = OrchestratorConfig()
 
-deliverables_config = DeliverablesConfig()
+deliverables_config = DeliverablesConfig.from_env()
