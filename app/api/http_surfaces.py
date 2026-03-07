@@ -77,6 +77,9 @@ class HttpSurfaceHandlers:
                 backend=self.deliverables_config.backend,
                 drive_root=self.deliverables_config.in_memory_drive_root,
                 google_drive_folder_id=self.deliverables_config.google_drive_folder_id,
+                environment=self.deliverables_config.google_drive_environment,
+                allow_google_drive_parent_override=self.deliverables_config.google_drive_allow_parent_override,
+                allowed_google_drive_parent_ids=self.deliverables_config.google_drive_allowed_parent_ids,
             )
         if self.inbound_pipeline is None:
             self.inbound_pipeline = InboundIngestionPipeline(
