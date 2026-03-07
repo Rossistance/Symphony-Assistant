@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from itertools import count
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import DeliverablesConfig
@@ -11,6 +10,12 @@ from app.messaging.agent_bus import AgentMessageBroker
 from app.messaging.base import InboundMessage
 from app.messaging.inbound_pipeline import InboundIngestionPipeline
 from app.messaging.runtime_state import get_runtime_state_store
+from app.messaging.state_store import (
+    EventRecordStore,
+    InMemoryEventRecordStore,
+    InMemoryTaskRecordStore,
+    TaskRecordStore,
+)
 from app.services.deliverables import (
     DeliverableArtifact,
     DeliverablePublisher,
@@ -43,36 +48,18 @@ class ApiResponse:
 
 
 @dataclass
-class TaskStore:
-    """In-memory task registry used by HTTP handlers and tests."""
-
-    _tasks: dict[str, dict[str, Any]]
-
-    @classmethod
-    def create(cls) -> "TaskStore":
-        return cls(_tasks={})
-
-    def put(self, task_id: str, task: dict[str, Any]) -> None:
-        self._tasks[task_id] = task
-
-    def get(self, task_id: str) -> dict[str, Any] | None:
-        return self._tasks.get(task_id)
-
-
-@dataclass
 class HttpSurfaceHandlers:
     """Pure handlers that can be adapted to any HTTP framework."""
 
     runtime: AgentRuntime
     message_bus: AgentMessageBroker
-    tasks: TaskStore
+    tasks: TaskRecordStore = field(default_factory=InMemoryTaskRecordStore)
     deliverable_publisher: DeliverablePublisher | None = None
-    deliverables_config: DeliverablesConfig = DeliverablesConfig()
+    deliverables_config: DeliverablesConfig = field(default_factory=DeliverablesConfig)
     inbound_pipeline: InboundIngestionPipeline | None = None
+    event_store: EventRecordStore = field(default_factory=InMemoryEventRecordStore)
 
     def __post_init__(self) -> None:
-        self.events: list[dict[str, Any]] = []
-        self._ids = count(1)
         if self.deliverable_publisher is None:
             self.deliverable_publisher = create_deliverable_publisher(config=self.deliverables_config)
         if self.inbound_pipeline is None:
@@ -81,8 +68,12 @@ class HttpSurfaceHandlers:
                 event_emitter=self._emit,
             )
 
+    @property
+    def events(self) -> list[dict[str, Any]]:
+        return self.event_store.list()
+
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
-        self.events.append({"event_type": normalize_event_type(event_type), "payload": payload})
+        self.event_store.append(normalize_event_type(event_type), payload)
 
     def _publish_failure_response(
         self,
@@ -179,7 +170,7 @@ class HttpSurfaceHandlers:
         if not prompt:
             return ApiResponse(status_code=400, body={"error": "prompt is required"})
 
-        task_id = str(payload.get("task_id") or f"task-{next(self._ids)}")
+        task_id = str(payload.get("task_id") or f"task-{self.tasks.next_task_sequence()}")
         lead_id = f"lead-{task_id}"
         self.runtime.register_lead_agent(
             agent_id=lead_id,
@@ -389,7 +380,6 @@ __all__ = [
     "HttpSurfaceHandlers",
     "ORCHESTRATE_JOB_ROUTE",
     "TASK_DETAILS_ROUTE",
-    "TaskStore",
     "WHATSAPP_WEBHOOK_ROUTE",
     "normalize_event_type",
 ]

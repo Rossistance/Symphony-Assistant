@@ -17,11 +17,11 @@ from app.api.http_surfaces import (
     TASK_DETAILS_ROUTE,
     WHATSAPP_WEBHOOK_ROUTE,
     HttpSurfaceHandlers,
-    TaskStore,
 )
 from app.messaging.agent_bus import AgentMessageBroker
 from app.messaging.base import InboundMessage
 from app.messaging.runtime_state import get_runtime_state_store
+from app.messaging.state_store import SqliteHttpSurfaceStateStore
 from app.services.agent_runtime import AgentRuntime
 from app.services.deliverables import DeliverableArtifact, DeliverablePublisherError, InMemoryDeliverablePublisher
 from app.services.model_routing import ModelResponse, RoutedModelClient, TransientProviderError
@@ -56,7 +56,8 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         self.handlers = HttpSurfaceHandlers(
             runtime=AgentRuntime(clock=lambda: 0),
             message_bus=AgentMessageBroker(),
-            tasks=TaskStore.create(),
+            tasks=SqliteHttpSurfaceStateStore(Path(self.temp_dir.name) / "http_surface_state.db"),
+            event_store=SqliteHttpSurfaceStateStore(Path(self.temp_dir.name) / "http_surface_state.db"),
         )
 
     def tearDown(self):
@@ -112,7 +113,8 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         handlers = HttpSurfaceHandlers(
             runtime=AgentRuntime(clock=lambda: 0),
             message_bus=AgentMessageBroker(),
-            tasks=TaskStore.create(),
+            tasks=SqliteHttpSurfaceStateStore(Path(self.temp_dir.name) / "http_surface_state.db"),
+            event_store=SqliteHttpSurfaceStateStore(Path(self.temp_dir.name) / "http_surface_state.db"),
             deliverables_config=DeliverablesConfig(
                 backend="in_memory",
                 in_memory_drive_root="https://drive.configured/files",
@@ -131,7 +133,8 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         handlers = HttpSurfaceHandlers(
             runtime=AgentRuntime(clock=lambda: 0),
             message_bus=AgentMessageBroker(),
-            tasks=TaskStore.create(),
+            tasks=SqliteHttpSurfaceStateStore(Path(self.temp_dir.name) / "http_surface_state.db"),
+            event_store=SqliteHttpSurfaceStateStore(Path(self.temp_dir.name) / "http_surface_state.db"),
             deliverables_config=DeliverablesConfig(
                 backend="google_drive",
                 in_memory_drive_root="https://drive.example/files",
@@ -153,7 +156,8 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         handlers = HttpSurfaceHandlers(
             runtime=AgentRuntime(clock=lambda: 0),
             message_bus=AgentMessageBroker(),
-            tasks=TaskStore.create(),
+            tasks=SqliteHttpSurfaceStateStore(Path(self.temp_dir.name) / "http_surface_state.db"),
+            event_store=SqliteHttpSurfaceStateStore(Path(self.temp_dir.name) / "http_surface_state.db"),
             deliverable_publisher=FailingDeliverablePublisher(),
         )
 
@@ -298,6 +302,32 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         self.assertEqual(replay.status_code, 202)
         self.assertFalse(replay.body["accepted"])
         self.assertTrue(replay.body["duplicate"])
+
+
+    def test_restart_continuity_reloads_tasks_and_events_from_same_db(self):
+        db_path = Path(self.temp_dir.name) / "continuity_http_surface.db"
+        first = HttpSurfaceHandlers(
+            runtime=AgentRuntime(clock=lambda: 0),
+            message_bus=AgentMessageBroker(),
+            tasks=SqliteHttpSurfaceStateStore(db_path),
+            event_store=SqliteHttpSurfaceStateStore(db_path),
+        )
+
+        created = first.post_jobs_orchestrate({"task_id": "task-restart", "prompt": "prepare update"})
+        self.assertEqual(created.status_code, 200)
+        self.assertTrue(any(event["event_type"] == "deliverable.published" for event in first.events))
+
+        reloaded = HttpSurfaceHandlers(
+            runtime=AgentRuntime(clock=lambda: 0),
+            message_bus=AgentMessageBroker(),
+            tasks=SqliteHttpSurfaceStateStore(db_path),
+            event_store=SqliteHttpSurfaceStateStore(db_path),
+        )
+
+        lookup = reloaded.get_api_v1_tasks_id("task-restart")
+        self.assertEqual(lookup.status_code, 200)
+        self.assertEqual(lookup.body["status"], "completed")
+        self.assertTrue(any(event["event_type"] == "deliverable.published" for event in reloaded.events))
 
     def test_daily_suggestion_surface(self):
         response = self.handlers.post_jobs_daily_suggestion({"user": "alex"})
