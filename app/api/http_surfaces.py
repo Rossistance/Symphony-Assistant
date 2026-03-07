@@ -7,6 +7,11 @@ from itertools import count
 from typing import Any
 
 from app.messaging.agent_bus import AgentMessageBroker
+from app.messaging.base import InboundMessage
+from app.messaging.inbound_pipeline import (
+    InMemoryInboundDedupeStore,
+    InboundIngestionPipeline,
+)
 from app.services.deliverables import (
     DeliverableArtifact,
     DeliverablePublisher,
@@ -60,12 +65,18 @@ class HttpSurfaceHandlers:
     message_bus: AgentMessageBroker
     tasks: TaskStore
     deliverable_publisher: DeliverablePublisher | None = None
+    inbound_pipeline: InboundIngestionPipeline | None = None
 
     def __post_init__(self) -> None:
         self.events: list[dict[str, Any]] = []
         self._ids = count(1)
         if self.deliverable_publisher is None:
             self.deliverable_publisher = InMemoryDeliverablePublisher()
+        if self.inbound_pipeline is None:
+            self.inbound_pipeline = InboundIngestionPipeline(
+                dedupe_store=InMemoryInboundDedupeStore(),
+                event_emitter=self._emit,
+            )
 
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         self.events.append({"event_type": normalize_event_type(event_type), "payload": payload})
@@ -75,6 +86,19 @@ class HttpSurfaceHandlers:
             inbound = parse_inbound_webhook(payload, channel="whatsapp")
         except WebhookValidationError as exc:
             return ApiResponse(status_code=422, body=exc.to_response_body())
+
+        assert self.inbound_pipeline is not None
+        ingestion_result = self.inbound_pipeline.ingest(inbound, source="webhook.whatsapp")
+        if not ingestion_result.accepted:
+            return ApiResponse(
+                status_code=202,
+                body={
+                    "accepted": True,
+                    "duplicate": True,
+                    "provider_message_id": inbound.provider_message_id,
+                    "provider_thread_id": inbound.provider_thread_id,
+                },
+            )
 
         reply_text = "Received. Processing your request."
         self._emit(
@@ -92,6 +116,22 @@ class HttpSurfaceHandlers:
                 "accepted": True,
                 "provider_message_id": inbound.provider_message_id,
                 "provider_thread_id": inbound.provider_thread_id,
+            },
+        )
+
+    def ingest_gateway_inbound(self, inbound: InboundMessage, *, source: str = "gateway.socket") -> ApiResponse:
+        """Accept normalized inbound events from gateway socket callbacks."""
+
+        assert self.inbound_pipeline is not None
+        ingestion_result = self.inbound_pipeline.ingest(inbound, source=source)
+        return ApiResponse(
+            status_code=202,
+            body={
+                "accepted": ingestion_result.accepted,
+                "duplicate": not ingestion_result.accepted,
+                "provider_message_id": inbound.provider_message_id,
+                "provider_thread_id": inbound.provider_thread_id,
+                "dedupe_key": ingestion_result.dedupe_key,
             },
         )
 
