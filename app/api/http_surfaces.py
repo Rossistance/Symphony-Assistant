@@ -80,6 +80,9 @@ class HttpSurfaceHandlers:
                 environment=self.deliverables_config.google_drive_environment,
                 allow_google_drive_parent_override=self.deliverables_config.google_drive_allow_parent_override,
                 allowed_google_drive_parent_ids=self.deliverables_config.google_drive_allowed_parent_ids,
+                google_drive_share_visibility=self.deliverables_config.google_drive_share_visibility,
+                google_drive_share_expiry_hours=self.deliverables_config.google_drive_share_expiry_hours,
+                google_drive_supports_permission_expiry=self.deliverables_config.google_drive_supports_permission_expiry,
             )
         if self.inbound_pipeline is None:
             self.inbound_pipeline = InboundIngestionPipeline(

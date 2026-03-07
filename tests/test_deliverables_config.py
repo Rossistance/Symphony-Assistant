@@ -71,6 +71,52 @@ class DeliverablesStorageConfigTests(unittest.TestCase):
                 use_shared_drive=True,
             ).validate()
 
+
+    def test_share_policy_defaults_to_private_for_non_production_environments(self):
+        with patch.dict(
+            os.environ,
+            {
+                "DELIVERABLES_BACKEND": "in_memory",
+                "DELIVERABLES_ENVIRONMENT": "dev",
+            },
+            clear=True,
+        ):
+            config = DeliverablesConfig.from_env()
+
+        self.assertEqual(config.google_drive_share_visibility, "private")
+        self.assertIsNone(config.google_drive_share_expiry_hours)
+        self.assertFalse(config.google_drive_supports_permission_expiry)
+
+    def test_share_policy_defaults_to_view_only_for_staging(self):
+        with patch.dict(
+            os.environ,
+            {
+                "DELIVERABLES_BACKEND": "in_memory",
+                "DELIVERABLES_ENVIRONMENT": "staging",
+            },
+            clear=True,
+        ):
+            config = DeliverablesConfig.from_env()
+
+        self.assertEqual(config.google_drive_share_visibility, "view_only")
+
+    def test_share_policy_overrides_are_loaded(self):
+        with patch.dict(
+            os.environ,
+            {
+                "DELIVERABLES_BACKEND": "in_memory",
+                "GOOGLE_DRIVE_SHARE_VISIBILITY": "private",
+                "GOOGLE_DRIVE_SHARE_EXPIRY_HOURS": "24",
+                "GOOGLE_DRIVE_SUPPORTS_PERMISSION_EXPIRY": "true",
+            },
+            clear=True,
+        ):
+            config = DeliverablesConfig.from_env()
+
+        self.assertEqual(config.google_drive_share_visibility, "private")
+        self.assertEqual(config.google_drive_share_expiry_hours, 24)
+        self.assertTrue(config.google_drive_supports_permission_expiry)
+
     def test_invalid_backend_fails_fast(self):
         with self.assertRaisesRegex(ValueError, "DELIVERABLES_BACKEND"):
             DeliverablesStorageConfig(backend="something_else").validate()

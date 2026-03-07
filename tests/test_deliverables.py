@@ -5,6 +5,7 @@ from app.services.deliverables import (
     DeliverablePublisherConfigError,
     DeliverablePublisherCredentialError,
     DriveFolderPolicy,
+    DriveSharePolicy,
     GoogleDriveDeliverablePublisher,
     InMemoryDeliverablePublisher,
     compose_completion_message,
@@ -109,7 +110,8 @@ class DeliverablePublisherTests(unittest.TestCase):
         )
 
         self.assertEqual(first, second)
-        self.assertTrue(first[0].share_url.startswith("https://drive.google.com/file/d/"))
+        self.assertTrue(first[0].share_url.startswith("drive://file/"))
+        self.assertEqual(first[0].share_visibility, "private")
 
 
     def test_google_drive_uses_folder_policy_segments(self):
@@ -132,6 +134,77 @@ class DeliverablePublisherTests(unittest.TestCase):
         )
 
         self.assertEqual(len(published[0].drive_file_id), 33)
+
+
+    def test_google_drive_private_visibility_generates_internal_reference(self):
+        publisher = GoogleDriveDeliverablePublisher(
+            folder_id="folder-123",
+            credentials_json='{"client_email": "svc@example.com"}',
+            share_policy=DriveSharePolicy(visibility="private"),
+        )
+
+        published = publisher.publish(
+            task_id="task-1",
+            artifacts=[
+                DeliverableArtifact(
+                    artifact_id="artifact-1",
+                    title="Plan",
+                    mime_type="text/markdown",
+                    source_ref="tmp/plan.md",
+                )
+            ],
+        )
+
+        self.assertEqual(published[0].share_visibility, "private")
+        self.assertEqual(published[0].permission_type, "restricted")
+        self.assertTrue(published[0].share_url.startswith("drive://file/"))
+
+    def test_google_drive_view_only_visibility_maps_to_anyone_reader(self):
+        publisher = GoogleDriveDeliverablePublisher(
+            folder_id="folder-123",
+            credentials_json='{"client_email": "svc@example.com"}',
+            share_policy=DriveSharePolicy(visibility="view_only"),
+        )
+
+        published = publisher.publish(
+            task_id="task-1",
+            artifacts=[
+                DeliverableArtifact(
+                    artifact_id="artifact-1",
+                    title="Plan",
+                    mime_type="text/markdown",
+                    source_ref="tmp/plan.md",
+                )
+            ],
+        )
+
+        self.assertEqual(published[0].share_visibility, "view_only")
+        self.assertEqual(published[0].permission_role, "reader")
+        self.assertEqual(published[0].permission_type, "anyone")
+        self.assertTrue(published[0].share_url.startswith("https://drive.google.com/file/d/"))
+
+    def test_google_drive_degrades_when_expiry_is_unsupported(self):
+        publisher = GoogleDriveDeliverablePublisher(
+            folder_id="folder-123",
+            credentials_json='{"client_email": "svc@example.com"}',
+            share_policy=DriveSharePolicy(visibility="view_only", expiry_hours=12, supports_permission_expiry=False),
+        )
+
+        published = publisher.publish(
+            task_id="task-1",
+            artifacts=[
+                DeliverableArtifact(
+                    artifact_id="artifact-1",
+                    title="Plan",
+                    mime_type="text/markdown",
+                    source_ref="tmp/plan.md",
+                )
+            ],
+        )
+
+        self.assertEqual(published[0].expiry_requested_hours, 12)
+        self.assertFalse(published[0].expiry_applied)
+        self.assertEqual(len(publisher.unsupported_expiry_events), 1)
 
     def test_google_drive_publish_requires_credentials_json(self):
         publisher = GoogleDriveDeliverablePublisher(folder_id="folder-123")

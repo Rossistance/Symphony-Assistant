@@ -7,6 +7,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
@@ -31,6 +32,40 @@ class PublishedDeliverable:
     mime_type: str
     drive_file_id: str
     share_url: str
+    access_reference: str
+    share_visibility: str
+    permission_role: str
+    permission_type: str
+    expiry_requested_hours: int | None = None
+    expiry_applied: bool = False
+
+
+@dataclass(frozen=True)
+class DriveSharePolicy:
+    """Share visibility and optional expiry policy for Google Drive permissions."""
+
+    visibility: str = "private"
+    expiry_hours: int | None = None
+    supports_permission_expiry: bool = False
+
+    def validate(self) -> None:
+        if self.visibility not in {"private", "view_only"}:
+            raise DeliverablePublisherConfigError("Drive share policy visibility must be one of: private, view_only")
+        if self.expiry_hours is not None and self.expiry_hours <= 0:
+            raise DeliverablePublisherConfigError("Drive share expiry must be a positive integer when set")
+
+
+@dataclass(frozen=True)
+class DrivePermissionApplication:
+    """Applied permission mapping and generated access location for a Drive file."""
+
+    visibility: str
+    permission_role: str
+    permission_type: str
+    share_url: str
+    access_reference: str
+    expiry_requested_hours: int | None
+    expiry_applied: bool
 
 
 class DeliverablePublisherError(RuntimeError):
@@ -162,6 +197,10 @@ class InMemoryDeliverablePublisher:
                 mime_type=artifact.mime_type,
                 drive_file_id=drive_file_id,
                 share_url=f"{self.drive_root}/{drive_file_id}/{quote(safe_name)}",
+                access_reference=f"{self.drive_root}/{drive_file_id}/{quote(safe_name)}",
+                share_visibility="view_only",
+                permission_role="reader",
+                permission_type="anyone",
             )
             published.append(published_artifact)
 
@@ -177,6 +216,8 @@ class GoogleDriveDeliverablePublisher:
     share_base_url: str = "https://drive.google.com/file/d"
     credentials_json: str | None = None
     folder_policy: DriveFolderPolicy | None = None
+    share_policy: DriveSharePolicy = field(default_factory=DriveSharePolicy)
+    unsupported_expiry_events: list[str] = field(default_factory=list)
 
     def publish(self, *, task_id: str, artifacts: list[DeliverableArtifact]) -> list[PublishedDeliverable]:
         policy = self.folder_policy or DriveFolderPolicy(
@@ -184,6 +225,7 @@ class GoogleDriveDeliverablePublisher:
             environment=os.getenv("APP_ENV", "dev"),
         )
         resolved_folder = policy.resolve(task_id=task_id)
+        self.share_policy.validate()
 
         raw_credentials = self.credentials_json or os.getenv("GOOGLE_DRIVE_CREDENTIALS_JSON", "")
         if not raw_credentials.strip():
@@ -213,17 +255,58 @@ class GoogleDriveDeliverablePublisher:
                 "utf-8"
             )
             drive_file_id = hashlib.sha256(stable_input).hexdigest()[:33]
+            permission = self._apply_share_policy(drive_file_id=drive_file_id)
             published.append(
                 PublishedDeliverable(
                     artifact_id=artifact.artifact_id,
                     title=artifact.title,
                     mime_type=artifact.mime_type,
                     drive_file_id=drive_file_id,
-                    share_url=f"{self.share_base_url}/{drive_file_id}/view",
+                    share_url=permission.share_url,
+                    access_reference=permission.access_reference,
+                    share_visibility=permission.visibility,
+                    permission_role=permission.permission_role,
+                    permission_type=permission.permission_type,
+                    expiry_requested_hours=permission.expiry_requested_hours,
+                    expiry_applied=permission.expiry_applied,
                 )
             )
 
         return published
+
+    def _apply_share_policy(self, *, drive_file_id: str) -> DrivePermissionApplication:
+        visibility = self.share_policy.visibility
+        expiry_requested = self.share_policy.expiry_hours
+        expiry_applied = expiry_requested is not None and self.share_policy.supports_permission_expiry
+
+        if expiry_requested is not None and not self.share_policy.supports_permission_expiry:
+            self.unsupported_expiry_events.append(
+                f"drive_file_id={drive_file_id}: permission expiry unsupported; expiry request ignored"
+            )
+
+        if visibility == "view_only":
+            permission_role = "reader"
+            permission_type = "anyone"
+            share_url = f"{self.share_base_url}/{drive_file_id}/view"
+            access_reference = share_url
+        else:
+            permission_role = "reader"
+            permission_type = "restricted"
+            share_url = f"drive://file/{drive_file_id}"
+            access_reference = share_url
+
+        if expiry_applied:
+            _ = (datetime.now(UTC) + timedelta(hours=expiry_requested)).isoformat()
+
+        return DrivePermissionApplication(
+            visibility=visibility,
+            permission_role=permission_role,
+            permission_type=permission_type,
+            share_url=share_url,
+            access_reference=access_reference,
+            expiry_requested_hours=expiry_requested,
+            expiry_applied=expiry_applied,
+        )
 
 
 def create_deliverable_publisher(
@@ -234,6 +317,9 @@ def create_deliverable_publisher(
     environment: str = "dev",
     allow_google_drive_parent_override: bool = False,
     allowed_google_drive_parent_ids: tuple[str, ...] = (),
+    google_drive_share_visibility: str = "private",
+    google_drive_share_expiry_hours: int | None = None,
+    google_drive_supports_permission_expiry: bool = False,
 ) -> DeliverablePublisher:
     """Create a deliverable publisher from the configured backend."""
 
@@ -248,6 +334,11 @@ def create_deliverable_publisher(
                 environment=environment,
                 allow_parent_override=allow_google_drive_parent_override,
                 allowed_override_parent_ids=allowed_google_drive_parent_ids,
+            ),
+            share_policy=DriveSharePolicy(
+                visibility=google_drive_share_visibility,
+                expiry_hours=google_drive_share_expiry_hours,
+                supports_permission_expiry=google_drive_supports_permission_expiry,
             ),
         )
 
