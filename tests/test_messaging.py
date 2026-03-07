@@ -1,5 +1,7 @@
 import os
 import unittest
+from urllib.error import HTTPError, URLError
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from dataclasses import dataclass, field
@@ -8,6 +10,12 @@ from typing import Any
 from app.config import MessagingConfig
 from app.messaging.adapters.whatsapp import WhatsAppCloudAdapter
 from app.messaging.base import InboundMessage
+from app.messaging.gateway_client import (
+    GatewayHTTPError,
+    GatewayRetryExhaustedError,
+    GatewayTransportError,
+    HttpGatewayClient,
+)
 from app.messaging.router import MessagingRouter
 from app.messaging.state_store import SqliteMessagingStateStore
 from app.webhooks.inbound import parse_inbound_webhook
@@ -86,6 +94,137 @@ class MessagingRouterTests(unittest.TestCase):
             self.assertEqual(record.provider_message_id, "provider-8")
             self.assertEqual(record.provider_thread_id, "thread-1")
             self.assertEqual(record.recipient, "+1555")
+
+    def test_whatsapp_adapter_surfaces_http_errors_with_correlation_id(self):
+        class FailingGatewayClient:
+            session_id = "session-test"
+
+            def send(self, *, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+                raise GatewayHTTPError(status_code=400, response_body='{"error":"bad request"}')
+
+        adapter = WhatsAppCloudAdapter(gateway_client=FailingGatewayClient())
+
+        with self.assertRaisesRegex(Exception, "correlation_id=") as ctx:
+            adapter.send_message("+1555", "hello")
+
+        exc = ctx.exception
+        self.assertFalse(getattr(exc, "retryable", True))
+        self.assertTrue(getattr(exc, "correlation_id", ""))
+
+    def test_whatsapp_adapter_preserves_provided_correlation_id_on_failure(self):
+        class FailingGatewayClient:
+            session_id = "session-test"
+
+            def send(self, *, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+                raise GatewayTransportError("connection reset")
+
+        adapter = WhatsAppCloudAdapter(gateway_client=FailingGatewayClient())
+
+        with self.assertRaisesRegex(Exception, "correlation_id=corr-123") as ctx:
+            adapter._send_via_gateway({"to": "+1555", "type": "text", "text": "hello", "correlation_id": "corr-123"})
+
+        self.assertEqual(getattr(ctx.exception, "correlation_id", None), "corr-123")
+
+
+class HttpGatewayClientRetryTests(unittest.TestCase):
+    def test_retries_transient_transport_failure_then_succeeds(self):
+        calls = 0
+        delays: list[float] = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"message_id":"ok-1"}'
+
+        def flaky_urlopen(*args: Any, **kwargs: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise URLError("temporary dns failure")
+            return FakeResponse()
+
+        client = HttpGatewayClient(
+            base_url="http://localhost:8080",
+            api_key=None,
+            session_id="session-test",
+            max_attempts=3,
+            jitter_ratio=0.0,
+            sleep_fn=lambda delay: delays.append(delay),
+            urlopen_fn=flaky_urlopen,
+        )
+
+        response = client.send(session_id="session-test", payload={"to": "+1555"})
+
+        self.assertEqual(response["message_id"], "ok-1")
+        self.assertEqual(calls, 3)
+        self.assertEqual(delays, [0.25, 0.5])
+
+    def test_does_not_retry_non_retryable_4xx(self):
+        calls = 0
+
+        def bad_request(*args: Any, **kwargs: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            raise HTTPError(
+                url="http://localhost",
+                code=400,
+                msg="Bad Request",
+                hdrs=None,
+                fp=BytesIO(b'{"error":"invalid payload"}'),
+            )
+
+        client = HttpGatewayClient(
+            base_url="http://localhost:8080",
+            api_key=None,
+            session_id="session-test",
+            max_attempts=3,
+            jitter_ratio=0.0,
+            sleep_fn=lambda _: None,
+            urlopen_fn=bad_request,
+        )
+
+        with self.assertRaises(GatewayHTTPError) as ctx:
+            client.send(session_id="session-test", payload={"to": "+1555"})
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("invalid payload", str(ctx.exception))
+
+    def test_retries_5xx_and_raises_retry_exhausted(self):
+        calls = 0
+
+        def unavailable(*args: Any, **kwargs: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            raise HTTPError(
+                url="http://localhost",
+                code=503,
+                msg="Service Unavailable",
+                hdrs=None,
+                fp=BytesIO(b'{"error":"overloaded"}'),
+            )
+
+        client = HttpGatewayClient(
+            base_url="http://localhost:8080",
+            api_key=None,
+            session_id="session-test",
+            max_attempts=3,
+            jitter_ratio=0.0,
+            sleep_fn=lambda _: None,
+            urlopen_fn=unavailable,
+        )
+
+        with self.assertRaises(GatewayRetryExhaustedError) as ctx:
+            client.send(session_id="session-test", payload={"to": "+1555"})
+
+        self.assertEqual(calls, 3)
+        self.assertEqual(ctx.exception.attempts, 3)
+        self.assertIsInstance(ctx.exception.last_error, GatewayHTTPError)
 
 
 
