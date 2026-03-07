@@ -9,6 +9,7 @@ from app.messaging.adapters.ios_bridge import IOSBridgeAdapter
 from app.messaging.adapters.sms import SmsAdapter
 from app.messaging.adapters.whatsapp import WhatsAppCloudAdapter
 from app.messaging.base import InboundMessage, MessagingTransport, OutboundResult
+from app.messaging.runtime_state import get_runtime_state_store
 
 
 @dataclass
@@ -20,7 +21,7 @@ class MessagingRouter:
 
     def __post_init__(self) -> None:
         default_adapters: dict[str, MessagingTransport] = {
-            "whatsapp": WhatsAppCloudAdapter(),
+            "whatsapp": WhatsAppCloudAdapter(correlation_store=get_runtime_state_store()),
             "sms": SmsAdapter(),
         }
         if self.settings.enable_ios_bridge:
