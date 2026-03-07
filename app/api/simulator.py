@@ -36,6 +36,7 @@ class SimulationStateStore:
             "approval": {"status": "pending", "note": ""},
             "drive": {"root": "Simulated Drive", "folders": [], "files": []},
             "return_message": None,
+            "error": None,
             "temp_db_file": str(self.path),
         }
 
@@ -64,6 +65,7 @@ class SimulationStateStore:
                     "approval": {"status": "pending", "note": ""},
                     "drive": {"root": "Simulated Drive", "folders": [], "files": []},
                     "return_message": None,
+                    "error": None,
                 }
             )
             self._state["whatsapp"] = {
@@ -80,7 +82,7 @@ class SimulationStateStore:
             self._persist()
             return self.snapshot()
 
-    def apply_agent_simulation(self, *, use_groq: bool) -> dict[str, Any]:
+    def apply_agent_simulation(self, *, use_groq: bool, require_groq: bool = False) -> dict[str, Any]:
         with self._lock:
             if not self._state["task_id"]:
                 raise ValueError("No simulation task has been started")
@@ -88,9 +90,17 @@ class SimulationStateStore:
             lead_summary = "Lead agent decomposed request into retrieval + response workstreams."
             sub_summary = "Sub-agent compiled return handling checklist and status updates."
             model_summary = "Groq disabled for this run."
+            provider_used = "none"
+
             if use_groq:
                 if not os.getenv("GROQ_API_KEY"):
+                    if require_groq:
+                        self._state["error"] = "GROQ_API_KEY is required for this run but is not configured"
+                        self._state["status"] = "failed"
+                        self._persist()
+                        raise ValueError(str(self._state["error"]))
                     model_summary = "GROQ_API_KEY not set; using deterministic fallback summary."
+                    provider_used = "fallback"
                 else:
                     generated = generate_response(
                         messages=[
@@ -103,16 +113,24 @@ class SimulationStateStore:
                         budget_context={"mode": "demo"},
                     )
                     model_summary = str(generated.get("content") or "No content returned by model adapter.")
+                    provider_used = str(generated.get("provider") or "groq")
+
             self._state["agent"] = {
                 "events": [
                     {"agent": "lead", "status": "started", "detail": "Lead agent accepted task."},
                     {"agent": "lead", "status": "planning", "detail": lead_summary},
                     {"agent": "sub-agent", "status": "running", "detail": sub_summary},
-                    {"agent": "lead", "status": "synthesized", "detail": model_summary},
+                    {
+                        "agent": "lead",
+                        "status": "synthesized",
+                        "detail": model_summary,
+                        "provider": provider_used,
+                    },
                     {"agent": "lead", "status": "completed", "detail": "Ready for approval."},
                 ]
             }
             self._state["status"] = "awaiting_approval"
+            self._state["error"] = None
             self._persist()
             return self.snapshot()
 
@@ -150,6 +168,13 @@ class SimulationStateStore:
             self._persist()
             return self.snapshot()
 
+    def auto_process(self, *, use_groq: bool, require_groq: bool, approval_note: str) -> dict[str, Any]:
+        """Run full whatsapp->agent->approval->drive->reply process automatically."""
+
+        self.apply_agent_simulation(use_groq=use_groq, require_groq=require_groq)
+        self.apply_approval(approved=True, note=approval_note)
+        return self.publish_return()
+
 
 SIMULATION_UI_HTML = """
 <!doctype html>
@@ -179,12 +204,15 @@ SIMULATION_UI_HTML = """
     <h3>1) Simulated WhatsApp Initiation</h3>
     <input id=\"phone\" value=\"+15550001111\" />
     <textarea id=\"prompt\" rows=\"5\">Please process a return request and share the final file.</textarea>
+    <label><input type=\"checkbox\" id=\"autoProcess\" checked /> Auto-run full workflow after start</label>
     <button onclick=\"startTask()\">Start Task</button>
+    <button onclick=\"startAndAutoRun()\">Start + Auto Complete</button>
     <pre id=\"whatsapp\"></pre>
   </section>
   <section class=\"panel\">
     <h3>2) Agent / Sub-agent Status</h3>
-    <label><input type=\"checkbox\" id=\"useGroq\" checked /> Use Groq-backed generation if configured</label>
+    <label><input type=\"checkbox\" id=\"useGroq\" checked /> Use Groq-backed generation</label>
+    <label><input type=\"checkbox\" id=\"requireGroq\" checked /> Require GROQ_API_KEY (fail if missing)</label>
     <button onclick=\"runAgents()\">Run Agent Workflow</button>
     <pre id=\"agents\"></pre>
   </section>
@@ -222,7 +250,7 @@ function render(state) {
   document.getElementById('agents').textContent = JSON.stringify(state.agent, null, 2);
   document.getElementById('approval').textContent = JSON.stringify(state.approval, null, 2);
   document.getElementById('drive').textContent = JSON.stringify(state.drive, null, 2);
-  document.getElementById('reply').textContent = JSON.stringify({status: state.status, return_message: state.return_message, messages: state.whatsapp.messages}, null, 2);
+  document.getElementById('reply').textContent = JSON.stringify({status: state.status, error: state.error, return_message: state.return_message, messages: state.whatsapp.messages}, null, 2);
   document.getElementById('dbFile').textContent = `Temp DB file: ${state.temp_db_file}`;
   sessionStorage.setItem('sim_state', JSON.stringify(state));
 }
@@ -232,11 +260,29 @@ async function startTask() {
   const state = await callApi('/simulator/api/whatsapp-init', {
     phone: document.getElementById('phone').value,
     message: document.getElementById('prompt').value,
+    auto_process: document.getElementById('autoProcess').checked,
+    use_groq: document.getElementById('useGroq').checked,
+    require_groq: document.getElementById('requireGroq').checked,
+    approval_note: document.getElementById('approvalNote').value,
+  });
+  render(state);
+}
+async function startAndAutoRun() {
+  const state = await callApi('/simulator/api/whatsapp-init', {
+    phone: document.getElementById('phone').value,
+    message: document.getElementById('prompt').value,
+    auto_process: true,
+    use_groq: document.getElementById('useGroq').checked,
+    require_groq: document.getElementById('requireGroq').checked,
+    approval_note: document.getElementById('approvalNote').value,
   });
   render(state);
 }
 async function runAgents() {
-  render(await callApi('/simulator/api/agent-run', {use_groq: document.getElementById('useGroq').checked}));
+  render(await callApi('/simulator/api/agent-run', {
+    use_groq: document.getElementById('useGroq').checked,
+    require_groq: document.getElementById('requireGroq').checked,
+  }));
 }
 async function approveTask(approved) {
   render(await callApi('/simulator/api/approve', {approved, note: document.getElementById('approvalNote').value}));

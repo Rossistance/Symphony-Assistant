@@ -222,7 +222,8 @@ Notes:
 
 - Simulator state is mirrored to a temp JSON file and also cached in browser `sessionStorage`.
 - Browser close/reset calls clear simulator state.
-- Only the agent workflow pane can invoke the model router (Groq-first when `GROQ_API_KEY` is set); other panes are deterministic simulations.
+- The simulator now supports automatic end-to-end flow from WhatsApp initiation through agent, approval, drive publish, and WhatsApp return via the `Auto-run full workflow` control.
+- The agent pane can be configured to require `GROQ_API_KEY` and fail fast if missing, so you can verify a real key-backed model step in the chain.
 
 
 ## 7) One-shot install + run command (recommended)

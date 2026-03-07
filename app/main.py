@@ -110,20 +110,45 @@ def create_app(*, runtime: RuntimeContainer | None = None) -> Flask:
     @app.post("/simulator/api/whatsapp-init")
     def post_simulator_whatsapp_init():
         payload = request.get_json(silent=True) or {}
-        return jsonify(
-            container.simulation_store.initialize_task(
-                phone=str(payload.get("phone") or "unknown"),
-                message=str(payload.get("message") or ""),
-            )
+        state = container.simulation_store.initialize_task(
+            phone=str(payload.get("phone") or "unknown"),
+            message=str(payload.get("message") or ""),
         )
+        if bool(payload.get("auto_process")):
+            try:
+                state = container.simulation_store.auto_process(
+                    use_groq=bool(payload.get("use_groq", True)),
+                    require_groq=bool(payload.get("require_groq", True)),
+                    approval_note=str(payload.get("approval_note") or "Auto-approved by simulator workflow."),
+                )
+            except ValueError:
+                state = container.simulation_store.snapshot()
+        return jsonify(state)
 
     @app.post("/simulator/api/agent-run")
     def post_simulator_agent_run():
         payload = request.get_json(silent=True) or {}
         try:
-            state = container.simulation_store.apply_agent_simulation(use_groq=bool(payload.get("use_groq", True)))
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            state = container.simulation_store.apply_agent_simulation(
+                use_groq=bool(payload.get("use_groq", True)),
+                require_groq=bool(payload.get("require_groq", False)),
+            )
+        except ValueError:
+            return jsonify(container.simulation_store.snapshot()), 400
+        return jsonify(state)
+
+
+    @app.post("/simulator/api/auto-run")
+    def post_simulator_auto_run():
+        payload = request.get_json(silent=True) or {}
+        try:
+            state = container.simulation_store.auto_process(
+                use_groq=bool(payload.get("use_groq", True)),
+                require_groq=bool(payload.get("require_groq", True)),
+                approval_note=str(payload.get("approval_note") or "Auto-approved by simulator workflow."),
+            )
+        except ValueError:
+            return jsonify(container.simulation_store.snapshot()), 400
         return jsonify(state)
 
     @app.post("/simulator/api/approve")
