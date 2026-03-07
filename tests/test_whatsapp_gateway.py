@@ -147,6 +147,40 @@ class WhatsAppGatewayTests(unittest.TestCase):
             self.assertTrue(gateway.notify_connection_lost("socket_closed"))
             self.assertEqual(gateway.state, GatewaySessionState.CONNECTED)
 
+    def test_notify_connection_lost_from_disconnected_does_not_retry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FileAuthStateStore(Path(tmpdir) / "auth.json")
+            connector = FakeConnector()
+
+            gateway = WhatsAppGateway(
+                session_id="session-7",
+                connector=connector,
+                auth_state_store=store,
+            )
+
+            self.assertFalse(gateway.notify_connection_lost("socket_closed"))
+            self.assertEqual(connector.connect_calls, 0)
+
+    def test_backoff_jitter_is_bounded(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FileAuthStateStore(Path(tmpdir) / "auth.json")
+            connector = FakeConnector(failures_before_success=1)
+            delays: list[float] = []
+
+            gateway = WhatsAppGateway(
+                session_id="session-8",
+                connector=connector,
+                auth_state_store=store,
+                base_backoff_seconds=2.0,
+                max_backoff_seconds=2.0,
+                jitter_ratio=0.25,
+                random_fn=lambda: 1.0,
+                sleep_fn=lambda delay: delays.append(delay),
+            )
+
+            self.assertTrue(gateway.connect())
+            self.assertEqual(delays, [2.5])
+
 
 
 if __name__ == "__main__":

@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from uuid import uuid4
 from typing import Any
+from uuid import uuid4
 
 from app.messaging.base import InboundMessage, OutboundResult
-from app.messaging.gateway_client import GatewayClient, HttpGatewayClient
+from app.messaging.gateway_client import (
+    GatewayClient,
+    GatewayHTTPError,
+    GatewayRetryExhaustedError,
+    GatewayTransportError,
+    HttpGatewayClient,
+)
 from app.messaging.state_store import InMemoryOutboundCorrelationStore, OutboundCorrelationRecord, OutboundCorrelationStore
 
 
@@ -17,6 +23,15 @@ def _first_non_empty(response: dict[str, Any], *keys: str) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+class WhatsAppDeliveryError(RuntimeError):
+    """Actionable send failure surfaced to callers."""
+
+    def __init__(self, message: str, *, correlation_id: str, retryable: bool) -> None:
+        super().__init__(message)
+        self.correlation_id = correlation_id
+        self.retryable = retryable
 
 
 @dataclass
@@ -33,13 +48,51 @@ class WhatsAppCloudAdapter:
             self.session_id = self.gateway_client.session_id
 
     def _send_via_gateway(self, payload: dict[str, Any]) -> OutboundResult:
+        correlation_id = str(payload.get("correlation_id") or uuid4())
         if not self.session_id:
-            raise RuntimeError("WHATSAPP_GATEWAY_SESSION_ID is required for WhatsApp gateway transport")
+            raise WhatsAppDeliveryError(
+                "WHATSAPP_GATEWAY_SESSION_ID is required for WhatsApp gateway transport",
+                correlation_id=correlation_id,
+                retryable=False,
+            )
 
-        response = self.gateway_client.send(session_id=self.session_id, payload=payload)
+        gateway_payload = {**payload, "correlation_id": correlation_id}
+
+        try:
+            response = self.gateway_client.send(session_id=self.session_id, payload=gateway_payload)
+        except GatewayRetryExhaustedError as exc:
+            raise WhatsAppDeliveryError(
+                (
+                    f"WhatsApp gateway failed after {exc.attempts} attempts. "
+                    f"correlation_id={correlation_id}. Last error: {exc.last_error}"
+                ),
+                correlation_id=correlation_id,
+                retryable=True,
+            ) from exc
+        except GatewayTransportError as exc:
+            raise WhatsAppDeliveryError(
+                f"Transport failure while sending WhatsApp message. correlation_id={correlation_id}. {exc}",
+                correlation_id=correlation_id,
+                retryable=True,
+            ) from exc
+        except GatewayHTTPError as exc:
+            retryable = exc.retryable
+            raise WhatsAppDeliveryError(
+                (
+                    f"WhatsApp gateway rejected message with status={exc.status_code}. "
+                    f"correlation_id={correlation_id}. response_body={exc.response_body or ''}"
+                ),
+                correlation_id=correlation_id,
+                retryable=retryable,
+            ) from exc
+
         provider_message_id = _first_non_empty(response, "provider_message_id", "message_id", "id")
         if provider_message_id is None:
-            raise ValueError("Gateway response is missing provider message id")
+            raise WhatsAppDeliveryError(
+                f"Gateway response is missing provider message id. correlation_id={correlation_id}",
+                correlation_id=correlation_id,
+                retryable=False,
+            )
 
         provider_thread_id = _first_non_empty(
             response,
@@ -47,16 +100,15 @@ class WhatsAppCloudAdapter:
             "thread_id",
             "conversation_id",
         )
-        correlation_id = str(payload.get("correlation_id") or uuid4())
         self.correlation_store.record(
             OutboundCorrelationRecord(
                 correlation_id=correlation_id,
                 channel=self.channel,
                 provider_message_id=provider_message_id,
                 provider_thread_id=provider_thread_id,
-                recipient=str(payload.get("to") or ""),
+                recipient=str(gateway_payload.get("to") or ""),
                 session_id=self.session_id,
-                in_reply_to=str(payload.get("in_reply_to")) if payload.get("in_reply_to") else None,
+                in_reply_to=str(gateway_payload.get("in_reply_to")) if gateway_payload.get("in_reply_to") else None,
             )
         )
 
