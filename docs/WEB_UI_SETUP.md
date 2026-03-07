@@ -255,3 +255,40 @@ python -m pip install -U pip
 python -m pip install flask pytest
 python -m app.main
 ```
+
+## 8) Windows PowerShell (no WSL) — exact commands
+
+If you are running from **Windows PowerShell**, use the PowerShell script (not the bash script):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_local_simulator.ps1
+```
+
+Optional with Groq + custom port:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_local_simulator.ps1 -Port 8000 -GroqApiKey "your_real_groq_key"
+```
+
+Manual PowerShell commands (if you prefer no script):
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\python.exe -m ensurepip --upgrade
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install flask pytest
+$env:PORT="8000"
+$env:GROQ_API_KEY="your_real_groq_key"   # optional
+.\.venv\Scripts\python.exe -m app.main
+```
+
+### Common Windows errors and fixes
+
+- `source: The term 'source' is not recognized...`
+  - `source` is a bash command. In PowerShell, either run `.\.venv\Scripts\Activate.ps1` or call `.\.venv\Scripts\python.exe` directly.
+- `No module named pip`
+  - Use `py -m venv .venv`, then run `.\.venv\Scripts\python.exe -m ensurepip --upgrade` before pip install.
+- `wsl: Failed to translate ...`
+  - You are invoking a Linux/bash flow from Windows paths. Use `run_local_simulator.ps1` for native Windows execution.
+- `No module named 'flask'`
+  - Install with `.\.venv\Scripts\python.exe -m pip install flask pytest` and run app with the same interpreter.

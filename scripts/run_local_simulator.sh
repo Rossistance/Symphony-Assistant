@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# One-shot local setup + run for Symphony simulator UI.
+# One-shot local setup + run for Symphony simulator UI on Linux/macOS shells.
+# For Windows PowerShell, use scripts/run_local_simulator.ps1
 # Usage:
 #   bash scripts/run_local_simulator.sh
 # Optional:
