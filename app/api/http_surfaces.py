@@ -9,7 +9,7 @@ from typing import Any
 from app.messaging.agent_bus import AgentMessageBroker
 from app.services.agent_runtime import AgentRuntime, DelegationTask
 from app.services.orchestration_policy import ExecutionMode as OrchestrationMode, detect_execution_mode
-from app.webhooks.inbound import parse_inbound_webhook
+from app.webhooks.inbound import WebhookValidationError, parse_inbound_webhook
 
 WHATSAPP_WEBHOOK_ROUTE = "/webhooks/whatsapp"
 ORCHESTRATE_JOB_ROUTE = "/jobs/orchestrate"
@@ -62,7 +62,11 @@ class HttpSurfaceHandlers:
         self.events.append({"event_type": normalize_event_type(event_type), "payload": payload})
 
     def post_webhooks_whatsapp(self, payload: dict[str, Any]) -> ApiResponse:
-        inbound = parse_inbound_webhook(payload, channel="whatsapp")
+        try:
+            inbound = parse_inbound_webhook(payload, channel="whatsapp")
+        except WebhookValidationError as exc:
+            return ApiResponse(status_code=422, body=exc.to_response_body())
+
         reply_text = "Received. Processing your request."
         self._emit(
             "message.reply.sent",
