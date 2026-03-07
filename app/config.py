@@ -20,6 +20,11 @@ def _as_pipe_delimited_tuple(name: str, default: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split("|") if item.strip())
 
 
+def _csv_tuple(name: str, default: str = "") -> tuple[str, ...]:
+    raw = os.getenv(name, default)
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
 @dataclass(frozen=True)
 class MessagingConfig:
     """Feature flags and defaults for messaging adapters."""
@@ -128,6 +133,11 @@ class DeliverablesConfig:
     backend: str = os.getenv("DELIVERABLES_BACKEND", "in_memory").strip().lower()
     in_memory_drive_root: str = os.getenv("DELIVERABLES_IN_MEMORY_DRIVE_ROOT", "https://drive.example/files")
     google_drive_folder_id: str = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+    google_drive_environment: str = os.getenv("DELIVERABLES_ENVIRONMENT", os.getenv("APP_ENV", "dev"))
+    google_drive_allow_parent_override: bool = _as_bool("GOOGLE_DRIVE_ALLOW_PARENT_OVERRIDE", False)
+    google_drive_allowed_parent_ids: tuple[str, ...] = field(
+        default_factory=lambda: _csv_tuple("GOOGLE_DRIVE_ALLOWED_PARENT_IDS", "")
+    )
     storage: DeliverablesStorageConfig = field(default_factory=DeliverablesStorageConfig)
 
     def __post_init__(self) -> None:
@@ -140,6 +150,9 @@ class DeliverablesConfig:
             backend=os.getenv("DELIVERABLES_BACKEND", "in_memory").strip().lower(),
             in_memory_drive_root=os.getenv("DELIVERABLES_IN_MEMORY_DRIVE_ROOT", "https://drive.example/files"),
             google_drive_folder_id=os.getenv("GOOGLE_DRIVE_FOLDER_ID", ""),
+            google_drive_environment=os.getenv("DELIVERABLES_ENVIRONMENT", os.getenv("APP_ENV", "dev")),
+            google_drive_allow_parent_override=_as_bool("GOOGLE_DRIVE_ALLOW_PARENT_OVERRIDE", False),
+            google_drive_allowed_parent_ids=_csv_tuple("GOOGLE_DRIVE_ALLOWED_PARENT_IDS", ""),
             storage=DeliverablesStorageConfig.from_env(backend=os.getenv("DELIVERABLES_BACKEND", "in_memory")),
         )
         config.storage.validate()

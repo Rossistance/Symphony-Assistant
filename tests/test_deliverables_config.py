@@ -76,5 +76,24 @@ class DeliverablesStorageConfigTests(unittest.TestCase):
             DeliverablesStorageConfig(backend="something_else").validate()
 
 
+    def test_folder_policy_env_and_parent_overrides_are_loaded(self):
+        with patch.dict(
+            os.environ,
+            {
+                "DELIVERABLES_BACKEND": "google_drive",
+                "GOOGLE_DRIVE_CREDENTIALS_JSON": '{"client_email":"svc@example.com"}',
+                "DELIVERABLES_ENVIRONMENT": "staging",
+                "GOOGLE_DRIVE_ALLOW_PARENT_OVERRIDE": "true",
+                "GOOGLE_DRIVE_ALLOWED_PARENT_IDS": "rootA,rootB",
+            },
+            clear=True,
+        ):
+            config = DeliverablesConfig.from_env()
+
+        self.assertEqual(config.google_drive_environment, "staging")
+        self.assertTrue(config.google_drive_allow_parent_override)
+        self.assertEqual(config.google_drive_allowed_parent_ids, ("rootA", "rootB"))
+
+
 if __name__ == "__main__":
     unittest.main()
