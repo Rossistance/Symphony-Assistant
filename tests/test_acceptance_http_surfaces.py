@@ -10,7 +10,7 @@ from app.api.approvals import (
     DECISION_ROUTE,
     post_approval_decision,
 )
-from app.config import DeliverablesConfig
+from app.config import DeliverablesConfig, ModelRouterConfig
 from app.api.http_surfaces import (
     DAILY_SUGGESTION_ROUTE,
     ORCHESTRATE_JOB_ROUTE,
@@ -24,21 +24,34 @@ from app.messaging.runtime_state import get_runtime_state_store
 from app.messaging.state_store import SqliteHttpSurfaceStateStore
 from app.services.agent_runtime import AgentRuntime
 from app.services.deliverables import DeliverableArtifact, DeliverablePublisherError, InMemoryDeliverablePublisher
-from app.services.model_routing import ModelResponse, RoutedModelClient, TransientProviderError
+from app.models.base import GenerateRequest, ProviderCapabilities, TraceMetadata, TransientProviderError
+from app.models.router import ModelRouter
 from app.services.policy_engine import ActionPolicyEngine, ActionRequest
 
 
 class FakeProvider:
-    def __init__(self, outcomes):
+    def __init__(self, name: str, outcomes, *, supports_embeddings: bool = False):
+        self.name = name
+        self.capabilities = ProviderCapabilities(chat=True, tool_calling=True, embeddings=supports_embeddings)
         self.outcomes = list(outcomes)
         self.calls = 0
 
-    def generate(self, *, model: str, prompt: str) -> ModelResponse:
+    def generate(self, request: GenerateRequest, trace: TraceMetadata) -> dict[str, object]:
+        del trace
         self.calls += 1
         result = self.outcomes.pop(0)
         if isinstance(result, Exception):
             raise result
         return result
+
+    def embed(self, texts: list[str], trace: TraceMetadata) -> list[list[float]]:
+        del trace
+        if not self.capabilities.embeddings:
+            raise RuntimeError("embeddings not supported")
+        return [[0.1] for _ in texts]
+
+    def healthcheck(self) -> bool:
+        return True
 
 
 class FailingDeliverablePublisher:
@@ -337,33 +350,54 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
 
 
 class AcceptanceProviderRoutingTests(unittest.TestCase):
+    def _router(self, providers: dict[str, FakeProvider], *, max_retries: int = 2) -> ModelRouter:
+        registry = type(
+            "Registry",
+            (),
+            {
+                "providers": providers,
+                "capability_matrix": {
+                    name: {
+                        "chat": provider.capabilities.chat,
+                        "tool_calling": provider.capabilities.tool_calling,
+                        "embeddings": provider.capabilities.embeddings,
+                    }
+                    for name, provider in providers.items()
+                },
+            },
+        )()
+        return ModelRouter(
+            settings=ModelRouterConfig(router_order=tuple(providers.keys()), max_retries=max_retries),
+            registry=registry,
+            sleeper=lambda _: None,
+            random_fn=lambda: 0,
+        )
+
+    def _trace(self) -> TraceMetadata:
+        return TraceMetadata(run_id="acc-1", agent_id="acceptance", task_type="chat", budget_context={})
+
     def test_groq_precedence(self):
-        groq = FakeProvider([ModelResponse("groq result", 10, 5, 0.001)])
-        openai = FakeProvider([ModelResponse("openai result", 10, 5, 0.002)])
-        client = RoutedModelClient(providers={"groq": groq, "openai": openai}, fallback_map={"groq": "openai"})
+        groq = FakeProvider("groq", [{"content": "groq result"}])
+        openai = FakeProvider("openai", [{"content": "openai result"}])
+        router = self._router({"groq": groq, "openai": openai})
 
-        result = client.generate(model="llama", prompt="hi", provider="groq")
+        result = router.generate(GenerateRequest(messages=[{"role": "user", "content": "hi"}]), self._trace())
 
-        self.assertEqual(result.output_text, "groq result")
+        self.assertEqual(result["content"], "groq result")
         self.assertEqual(groq.calls, 1)
         self.assertEqual(openai.calls, 0)
 
     def test_groq_timeout_fallback(self):
-        groq = FakeProvider([TransientProviderError("timeout"), TransientProviderError("timeout")])
-        openai = FakeProvider([ModelResponse("fallback", 8, 4, 0.001)])
-        client = RoutedModelClient(
-            providers={"groq": groq, "openai": openai},
-            fallback_map={"groq": "openai"},
-            max_attempts=2,
-            sleep_fn=lambda _: None,
-        )
+        groq = FakeProvider("groq", [TransientProviderError("timeout"), TransientProviderError("timeout")])
+        openai = FakeProvider("openai", [{"content": "fallback"}])
+        router = self._router({"groq": groq, "openai": openai}, max_retries=1)
 
-        result = client.generate(model="llama", prompt="hi", provider="groq")
+        result = router.generate(GenerateRequest(messages=[{"role": "user", "content": "hi"}]), self._trace())
 
-        self.assertEqual(result.output_text, "fallback")
+        self.assertEqual(result["content"], "fallback")
         self.assertEqual(groq.calls, 2)
         self.assertEqual(openai.calls, 1)
-        self.assertIn("provider.route.fallback", [event.event_type for event in client.events])
+        self.assertIn("provider.route.fallback", [event.event_type for event in router.events])
 
 
 class AcceptanceApprovalDecisionTests(unittest.TestCase):
