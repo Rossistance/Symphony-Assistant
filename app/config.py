@@ -138,6 +138,9 @@ class DeliverablesConfig:
     google_drive_allowed_parent_ids: tuple[str, ...] = field(
         default_factory=lambda: _csv_tuple("GOOGLE_DRIVE_ALLOWED_PARENT_IDS", "")
     )
+    google_drive_share_visibility: str = "private"
+    google_drive_share_expiry_hours: int | None = None
+    google_drive_supports_permission_expiry: bool = False
     storage: DeliverablesStorageConfig = field(default_factory=DeliverablesStorageConfig)
 
     def __post_init__(self) -> None:
@@ -146,17 +149,33 @@ class DeliverablesConfig:
 
     @classmethod
     def from_env(cls) -> "DeliverablesConfig":
+        environment = os.getenv("DELIVERABLES_ENVIRONMENT", os.getenv("APP_ENV", "dev"))
+        default_visibility = "view_only" if environment.strip().lower() in {"prod", "production", "staging"} else "private"
+        visibility = os.getenv("GOOGLE_DRIVE_SHARE_VISIBILITY", default_visibility).strip().lower()
+        raw_expiry_hours = os.getenv("GOOGLE_DRIVE_SHARE_EXPIRY_HOURS", "").strip()
+        expiry_hours = int(raw_expiry_hours) if raw_expiry_hours else None
+
         config = cls(
             backend=os.getenv("DELIVERABLES_BACKEND", "in_memory").strip().lower(),
             in_memory_drive_root=os.getenv("DELIVERABLES_IN_MEMORY_DRIVE_ROOT", "https://drive.example/files"),
             google_drive_folder_id=os.getenv("GOOGLE_DRIVE_FOLDER_ID", ""),
-            google_drive_environment=os.getenv("DELIVERABLES_ENVIRONMENT", os.getenv("APP_ENV", "dev")),
+            google_drive_environment=environment,
             google_drive_allow_parent_override=_as_bool("GOOGLE_DRIVE_ALLOW_PARENT_OVERRIDE", False),
             google_drive_allowed_parent_ids=_csv_tuple("GOOGLE_DRIVE_ALLOWED_PARENT_IDS", ""),
+            google_drive_share_visibility=visibility,
+            google_drive_share_expiry_hours=expiry_hours,
+            google_drive_supports_permission_expiry=_as_bool("GOOGLE_DRIVE_SUPPORTS_PERMISSION_EXPIRY", False),
             storage=DeliverablesStorageConfig.from_env(backend=os.getenv("DELIVERABLES_BACKEND", "in_memory")),
         )
+        config._validate_share_policy()
         config.storage.validate()
         return config
+
+    def _validate_share_policy(self) -> None:
+        if self.google_drive_share_visibility not in {"private", "view_only"}:
+            raise ValueError("GOOGLE_DRIVE_SHARE_VISIBILITY must be one of: private, view_only")
+        if self.google_drive_share_expiry_hours is not None and self.google_drive_share_expiry_hours <= 0:
+            raise ValueError("GOOGLE_DRIVE_SHARE_EXPIRY_HOURS must be a positive integer when set")
 
 
 @dataclass(frozen=True)
