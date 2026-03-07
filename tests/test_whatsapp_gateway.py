@@ -4,7 +4,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.gateway.whatsapp_gateway import FileAuthStateStore, GatewaySessionState, WhatsAppGateway
+from app.gateway.whatsapp_gateway import (
+    ConnectionEventType,
+    FileAuthStateStore,
+    GatewaySessionState,
+    WhatsAppGateway,
+)
 
 
 @dataclass
@@ -103,6 +108,45 @@ class WhatsAppGatewayTests(unittest.TestCase):
 
             self.assertEqual(connector.disconnect_calls, 1)
             self.assertEqual(gateway.state, GatewaySessionState.DISCONNECTED)
+
+
+    def test_emits_normalized_connection_event_types(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FileAuthStateStore(Path(tmpdir) / "auth.json")
+            connector = FakeConnector()
+            telemetry_event_types: list[ConnectionEventType] = []
+
+            gateway = WhatsAppGateway(
+                session_id="session-5",
+                connector=connector,
+                auth_state_store=store,
+                telemetry_handler=lambda event: telemetry_event_types.append(event.event_type),
+            )
+
+            gateway.connect()
+            gateway.disconnect()
+
+            self.assertIn(ConnectionEventType.RECONNECT, telemetry_event_types)
+            self.assertIn(ConnectionEventType.CONNECT, telemetry_event_types)
+            self.assertIn(ConnectionEventType.DISCONNECT, telemetry_event_types)
+
+    def test_notify_connection_lost_reconnects(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = FileAuthStateStore(Path(tmpdir) / "auth.json")
+            connector = FakeConnector(failures_before_success=1)
+
+            gateway = WhatsAppGateway(
+                session_id="session-6",
+                connector=connector,
+                auth_state_store=store,
+                jitter_ratio=0.0,
+                sleep_fn=lambda _: None,
+            )
+
+            self.assertTrue(gateway.connect())
+            self.assertTrue(gateway.notify_connection_lost("socket_closed"))
+            self.assertEqual(gateway.state, GatewaySessionState.CONNECTED)
+
 
 
 if __name__ == "__main__":

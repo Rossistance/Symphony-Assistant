@@ -1,6 +1,7 @@
 """Gateway lifecycle components."""
 
 from app.gateway.whatsapp_gateway import (
+    ConnectionEventType,
     ConnectionTelemetryEvent,
     GatewaySessionSnapshot,
     GatewaySessionState,
@@ -11,6 +12,7 @@ from app.messaging.state_store import FileWhatsAppAuthStateStore
 FileAuthStateStore = FileWhatsAppAuthStateStore
 
 __all__ = [
+    "ConnectionEventType",
     "ConnectionTelemetryEvent",
     "FileAuthStateStore",
     "FileWhatsAppAuthStateStore",

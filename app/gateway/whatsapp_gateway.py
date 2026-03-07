@@ -23,6 +23,15 @@ class GatewaySessionState(str, Enum):
     FAILED = "FAILED"
 
 
+class ConnectionEventType(str, Enum):
+    """Normalized lifecycle events for connection observability."""
+
+    CONNECT = "gateway.connection.connect"
+    DISCONNECT = "gateway.connection.disconnect"
+    RECONNECT = "gateway.connection.reconnect"
+    FAILURE = "gateway.connection.failure"
+
+
 @dataclass(frozen=True)
 class ConnectionTelemetryEvent:
     """Telemetry record emitted for connection lifecycle updates."""
@@ -31,6 +40,7 @@ class ConnectionTelemetryEvent:
     state: GatewaySessionState
     previous_state: GatewaySessionState
     timestamp: float
+    event_type: ConnectionEventType
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -131,6 +141,16 @@ class WhatsAppGateway:
                 self._reconnect_attempts = 0
                 self._transition_to(GatewaySessionState.DISCONNECTED)
 
+    def notify_connection_lost(self, reason: str | None = None) -> bool:
+        """Trigger reconnect flow when an active socket unexpectedly disconnects."""
+
+        with self._lock:
+            if self._state == GatewaySessionState.DISCONNECTED:
+                return False
+            self._last_error = reason
+            self._transition_to(GatewaySessionState.RECONNECTING, error=reason)
+        return self._reconnect()
+
     def _reconnect(self) -> bool:
         while True:
             with self._lock:
@@ -148,6 +168,7 @@ class WhatsAppGateway:
                         state=GatewaySessionState.RECONNECTING,
                         previous_state=self._state,
                         timestamp=time.time(),
+                        event_type=ConnectionEventType.RECONNECT,
                         metadata={"attempt": attempt, "delay_seconds": delay, "error": self._last_error},
                     )
                 )
@@ -182,15 +203,27 @@ class WhatsAppGateway:
     def _transition_to(self, state: GatewaySessionState, *, error: str | None = None) -> None:
         previous = self._state
         self._state = state
+        event_type = self._event_type_for_state(state)
         self._emit_telemetry(
             ConnectionTelemetryEvent(
                 session_id=self.session_id,
                 state=state,
                 previous_state=previous,
                 timestamp=time.time(),
+                event_type=event_type,
                 metadata={"error": error} if error else {},
             )
         )
+
+    @staticmethod
+    def _event_type_for_state(state: GatewaySessionState) -> ConnectionEventType:
+        if state == GatewaySessionState.CONNECTED:
+            return ConnectionEventType.CONNECT
+        if state == GatewaySessionState.DISCONNECTED:
+            return ConnectionEventType.DISCONNECT
+        if state == GatewaySessionState.FAILED:
+            return ConnectionEventType.FAILURE
+        return ConnectionEventType.RECONNECT
 
     def _emit_telemetry(self, event: ConnectionTelemetryEvent) -> None:
         if self._telemetry_handler is not None:
