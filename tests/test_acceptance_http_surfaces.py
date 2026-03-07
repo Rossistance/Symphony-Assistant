@@ -57,6 +57,9 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.body["deliverable"], "Release summary v1")
+        self.assertEqual(len(response.body["deliverables"]), 1)
+        self.assertTrue(response.body["deliverables"][0]["share_url"].startswith("https://drive.example/files/"))
+        self.assertIn("Done — I completed draft release summary.", response.body["completion_message"])
 
         lookup = self.handlers.get_api_v1_tasks_id("task-deliverable")
         self.assertEqual(lookup.status_code, 200)
@@ -82,6 +85,7 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         event_types = [event["event_type"] for event in self.handlers.events]
         self.assertIn("agent.message.sent", event_types)
         self.assertIn("deliverable.published", event_types)
+        self.assertIn("message.reply.sent", event_types)
         self.assertIn("task.analysis.completed", event_types)
 
     def test_mode_selection_by_dependency_profile_and_slow_mode_trigger(self):

@@ -7,6 +7,12 @@ from itertools import count
 from typing import Any
 
 from app.messaging.agent_bus import AgentMessageBroker
+from app.services.deliverables import (
+    DeliverableArtifact,
+    DeliverablePublisher,
+    InMemoryDeliverablePublisher,
+    compose_completion_message,
+)
 from app.services.agent_runtime import AgentRuntime, DelegationTask
 from app.services.orchestration_policy import ExecutionMode as OrchestrationMode, detect_execution_mode
 from app.webhooks.inbound import WebhookValidationError, parse_inbound_webhook
@@ -53,10 +59,13 @@ class HttpSurfaceHandlers:
     runtime: AgentRuntime
     message_bus: AgentMessageBroker
     tasks: TaskStore
+    deliverable_publisher: DeliverablePublisher | None = None
 
     def __post_init__(self) -> None:
         self.events: list[dict[str, Any]] = []
         self._ids = count(1)
+        if self.deliverable_publisher is None:
+            self.deliverable_publisher = InMemoryDeliverablePublisher()
 
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         self.events.append({"event_type": normalize_event_type(event_type), "payload": payload})
@@ -142,7 +151,54 @@ class HttpSurfaceHandlers:
                 self._emit("agent.message.sent", {"task_id": task_id, "message_id": msg.message_id})
 
         deliverable = str(payload.get("deliverable") or f"Deliverable for: {prompt}")
-        self._emit("deliverable.published", {"task_id": task_id, "deliverable": deliverable})
+
+        artifacts_payload = payload.get("artifacts") or []
+        artifacts: list[DeliverableArtifact] = []
+        for index, item in enumerate(artifacts_payload, start=1):
+            source_ref = str(item.get("source_ref") or f"deliverable-{index}.txt").strip()
+            artifacts.append(
+                DeliverableArtifact(
+                    artifact_id=str(item.get("artifact_id") or f"artifact-{index}"),
+                    title=str(item.get("title") or f"Deliverable {index}"),
+                    mime_type=str(item.get("mime_type") or "text/plain"),
+                    source_ref=source_ref,
+                )
+            )
+
+        if not artifacts:
+            artifacts = [
+                DeliverableArtifact(
+                    artifact_id="artifact-1",
+                    title="Primary Deliverable",
+                    mime_type="text/plain",
+                    source_ref="deliverable.txt",
+                )
+            ]
+
+        assert self.deliverable_publisher is not None
+        published = self.deliverable_publisher.publish(task_id=task_id, artifacts=artifacts)
+        for deliverable_item in published:
+            self._emit(
+                "deliverable.published",
+                {
+                    "task_id": task_id,
+                    "artifact_id": deliverable_item.artifact_id,
+                    "title": deliverable_item.title,
+                    "drive_file_id": deliverable_item.drive_file_id,
+                    "share_url": deliverable_item.share_url,
+                },
+            )
+
+        completion_message = compose_completion_message(task_title=prompt, deliverables=published)
+        self._emit(
+            "message.reply.sent",
+            {
+                "channel": "whatsapp",
+                "task_id": task_id,
+                "text": completion_message,
+                "deliverable_count": len(published),
+            },
+        )
 
         mode = detect_execution_mode(prompt)
         self.tasks.put(
@@ -151,6 +207,17 @@ class HttpSurfaceHandlers:
                 "task_id": task_id,
                 "status": "completed",
                 "deliverable": deliverable,
+                "deliverables": [
+                    {
+                        "artifact_id": item.artifact_id,
+                        "title": item.title,
+                        "mime_type": item.mime_type,
+                        "drive_file_id": item.drive_file_id,
+                        "share_url": item.share_url,
+                    }
+                    for item in published
+                ],
+                "completion_message": completion_message,
                 "execution_mode": mode.value,
                 "delegation_mode": plan.mode.value,
                 "delegation_stages": plan.stages,
