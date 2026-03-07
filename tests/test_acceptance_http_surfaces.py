@@ -192,7 +192,15 @@ class AcceptanceApprovalDecisionTests(unittest.TestCase):
 
         response = post_approval_decision(
             approval_id=enforcement.approval_id or "",
-            payload={"actor": "ops", "decision": "approved"},
+            payload={
+                "actor": "ops",
+                "decision": "approved",
+                "auth": {
+                    "authenticated": True,
+                    "subject": "ops",
+                    "can_decide_approvals": True,
+                },
+            },
             policy_engine=engine,
         )
 
