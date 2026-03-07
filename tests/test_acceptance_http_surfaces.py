@@ -68,6 +68,20 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            set(response.body.keys()),
+            {
+                "task_id",
+                "status",
+                "deliverable",
+                "deliverables",
+                "completion_message",
+                "execution_mode",
+                "delegation_mode",
+                "delegation_stages",
+            },
+        )
+        self.assertEqual(list(response.body.keys()).count("completion_message"), 1)
         self.assertEqual(response.body["deliverable"], "Release summary v1")
         self.assertEqual(len(response.body["deliverables"]), 1)
         self.assertTrue(response.body["deliverables"][0]["share_url"].startswith("https://drive.example/files/"))
