@@ -196,3 +196,30 @@ If you want a practical progression with minimal risk:
 3. **Next:** add observability panels and artifact link previews.
 
 This gives immediate usability without blocking on full product UI design.
+
+
+## 6) New local workflow simulator UI (5 interactive windows)
+
+A lightweight browser-based simulator is now available for local testing of the intended flow:
+
+- WhatsApp initiation
+- Agent/sub-agent task execution updates
+- Approval decision
+- Simulated Drive folder/file placement
+- WhatsApp return reply
+
+Run the Flask app:
+
+```bash
+python -m app.main
+```
+
+Open:
+
+- `http://localhost:8000/simulator`
+
+Notes:
+
+- Simulator state is mirrored to a temp JSON file and also cached in browser `sessionStorage`.
+- Browser close/reset calls clear simulator state.
+- Only the agent workflow pane can invoke the model router (Groq-first when `GROQ_API_KEY` is set); other panes are deterministic simulations.

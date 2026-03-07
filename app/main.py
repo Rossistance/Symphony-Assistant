@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 
 from app.api.approvals import AuthenticatedActorContext, post_approval_decision
 from app.api.http_surfaces import HttpSurfaceHandlers
+from app.api.simulator import SIMULATION_UI_HTML, SimulationStateStore
 from app.config import DeliverablesConfig
 from app.messaging.agent_bus import AgentMessageBroker
 from app.messaging.state_store import SqliteHttpSurfaceStateStore
@@ -31,6 +32,7 @@ class RuntimeContainer:
 
     http_handlers: HttpSurfaceHandlers
     policy_engine: ActionPolicyEngine
+    simulation_store: SimulationStateStore = field(default_factory=SimulationStateStore)
 
 
 def to_json_response(api_response: ApiResponseLike):
@@ -64,7 +66,11 @@ def wire_runtime_dependencies() -> RuntimeContainer:
         event_store=state_store,
         deliverables_config=deliverables_config,
     )
-    return RuntimeContainer(http_handlers=handlers, policy_engine=ActionPolicyEngine())
+    return RuntimeContainer(
+        http_handlers=handlers,
+        policy_engine=ActionPolicyEngine(),
+        simulation_store=SimulationStateStore(),
+    )
 
 
 def create_app(*, runtime: RuntimeContainer | None = None) -> Flask:
@@ -87,6 +93,58 @@ def create_app(*, runtime: RuntimeContainer | None = None) -> Flask:
     @app.get("/api/v1/tasks/<task_id>")
     def get_task(task_id: str):
         return to_json_response(container.http_handlers.get_api_v1_tasks_id(task_id))
+
+
+    @app.get("/simulator")
+    def get_simulator_ui():
+        return Response(SIMULATION_UI_HTML, mimetype="text/html")
+
+    @app.get("/simulator/api/state")
+    def get_simulator_state():
+        return jsonify(container.simulation_store.snapshot())
+
+    @app.post("/simulator/api/reset")
+    def post_simulator_reset():
+        return jsonify(container.simulation_store.reset())
+
+    @app.post("/simulator/api/whatsapp-init")
+    def post_simulator_whatsapp_init():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(
+            container.simulation_store.initialize_task(
+                phone=str(payload.get("phone") or "unknown"),
+                message=str(payload.get("message") or ""),
+            )
+        )
+
+    @app.post("/simulator/api/agent-run")
+    def post_simulator_agent_run():
+        payload = request.get_json(silent=True) or {}
+        try:
+            state = container.simulation_store.apply_agent_simulation(use_groq=bool(payload.get("use_groq", True)))
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify(state)
+
+    @app.post("/simulator/api/approve")
+    def post_simulator_approve():
+        payload = request.get_json(silent=True) or {}
+        try:
+            state = container.simulation_store.apply_approval(
+                approved=bool(payload.get("approved")),
+                note=str(payload.get("note") or ""),
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify(state)
+
+    @app.post("/simulator/api/publish")
+    def post_simulator_publish():
+        try:
+            state = container.simulation_store.publish_return()
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify(state)
 
     @app.post("/api/v1/approvals/<approval_id>/decision")
     def post_approval(approval_id: str):
