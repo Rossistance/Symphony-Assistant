@@ -31,6 +31,23 @@ class OrchestrationPolicyTests(unittest.TestCase):
             ExecutionMode.SLOW,
         )
 
+    def test_conflicting_phrases_prefer_explicit_default_override(self):
+        cfg = OrchestratorConfig()
+
+        self.assertEqual(
+            detect_execution_mode(
+                "this is a hard problem but use default mode for this one",
+                config=cfg,
+            ),
+            ExecutionMode.DEFAULT,
+        )
+
+    def test_missing_message_falls_back_to_default_mode(self):
+        cfg = OrchestratorConfig()
+
+        self.assertEqual(detect_execution_mode("", config=cfg), ExecutionMode.DEFAULT)
+        self.assertEqual(detect_execution_mode("   ", config=cfg), ExecutionMode.DEFAULT)
+
     def test_trigger_phrases_are_configurable(self):
         os.environ["SLOW_MODE_TRIGGER_PHRASES"] = "deep review mode|careful path"
         cfg = OrchestratorConfig()

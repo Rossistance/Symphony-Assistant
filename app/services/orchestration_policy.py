@@ -37,9 +37,19 @@ def detect_execution_mode(
     *,
     config: OrchestratorConfig = orchestrator_config,
 ) -> ExecutionMode:
-    """Selects slow mode when configured trigger phrases are present in the message."""
+    """Selects execution mode using explicit-override then trigger-phrase precedence."""
+
+    if not user_message or not user_message.strip():
+        # Missing input always falls back to the least restrictive baseline policy.
+        return ExecutionMode.DEFAULT
 
     normalized_message = _normalize(user_message)
+
+    # Explicit default instructions win when both "slow" and "default" phrasing appear.
+    # This keeps conflict resolution deterministic and user-directed.
+    if "default mode" in normalized_message or "normal mode" in normalized_message:
+        return ExecutionMode.DEFAULT
+
     for phrase in config.slow_mode_trigger_phrases:
         if _normalize(phrase) in normalized_message:
             return ExecutionMode.SLOW

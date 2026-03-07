@@ -94,6 +94,8 @@ class PolicyExecutionResult:
     evaluation: PolicyEvaluation
     executed: bool
     approval_id: str | None
+    blocked: bool = False
+    block_reason: str | None = None
 
 
 class ActionPolicyEngine:
@@ -138,6 +140,7 @@ class ActionPolicyEngine:
         """Executes policy behavior for low/medium/high risk actions."""
 
         evaluation = self.evaluate(action)
+        # Deterministic precedence: auto execute < auto execute with audit < explicit approval.
         if evaluation.execution_policy is ExecutionPolicy.AUTO_EXECUTE:
             return PolicyExecutionResult(evaluation=evaluation, executed=True, approval_id=None)
 
@@ -157,7 +160,13 @@ class ActionPolicyEngine:
             status=ApprovalStatus.PENDING,
             created_at=self._utc_now(),
         )
-        return PolicyExecutionResult(evaluation=evaluation, executed=False, approval_id=approval_id)
+        return PolicyExecutionResult(
+            evaluation=evaluation,
+            executed=False,
+            approval_id=approval_id,
+            blocked=True,
+            block_reason="explicit approval required",
+        )
 
     def record_approval_decision(self, *, approval_id: str, actor: str, decision: ApprovalDecision) -> ApprovalRequest:
         """Applies approval decision and emits audit trail record."""
@@ -183,9 +192,14 @@ class ActionPolicyEngine:
 
     def _classify_risk(self, action_type: str) -> RiskLevel:
         normalized = action_type.strip().lower()
+        if not normalized:
+            # Missing action type falls back to medium so we keep auditability by default.
+            return RiskLevel.MEDIUM
+
         risk = self._RISK_BY_ACTION_TYPE.get(normalized)
         if risk is None:
-            raise PolicyError(f"unsupported action type '{action_type}'")
+            # Unknown inputs are treated as high risk to enforce a conservative hard block.
+            return RiskLevel.HIGH
         return risk
 
     def _record_audit(

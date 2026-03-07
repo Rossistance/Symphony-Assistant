@@ -51,6 +51,42 @@ class ActionPolicyEngineTests(unittest.TestCase):
         approval = self.engine.approvals[result.approval_id]
         self.assertEqual(approval.status, ApprovalStatus.PENDING)
 
+    def test_conflicting_action_type_normalization_uses_deterministic_winner(self):
+        result = self.engine.enforce(
+            ActionRequest(
+                action_id="act-5",
+                action_type="  EXTERNAL_SHARING  ",
+                description="share with external system",
+            )
+        )
+
+        self.assertEqual(result.evaluation.risk_level, RiskLevel.HIGH)
+        self.assertEqual(result.evaluation.execution_policy, ExecutionPolicy.REQUIRE_EXPLICIT_APPROVAL)
+        self.assertFalse(result.executed)
+        self.assertTrue(result.blocked)
+        self.assertEqual(result.block_reason, "explicit approval required")
+
+    def test_missing_action_type_falls_back_to_medium_with_audit(self):
+        result = self.engine.enforce(
+            ActionRequest(action_id="act-6", action_type="   ", description="missing type")
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(result.evaluation.risk_level, RiskLevel.MEDIUM)
+        self.assertEqual(result.evaluation.execution_policy, ExecutionPolicy.AUTO_EXECUTE_WITH_AUDIT)
+        self.assertEqual(len(self.engine.audit_trail), 1)
+
+    def test_unknown_action_type_is_hard_blocked_with_explicit_outcome(self):
+        result = self.engine.enforce(
+            ActionRequest(action_id="act-7", action_type="unknown_capability", description="unknown")
+        )
+
+        self.assertFalse(result.executed)
+        self.assertTrue(result.blocked)
+        self.assertEqual(result.block_reason, "explicit approval required")
+        self.assertEqual(result.evaluation.risk_level, RiskLevel.HIGH)
+        self.assertIsNotNone(result.approval_id)
+
     def test_approval_decision_records_audit_trail(self):
         result = self.engine.enforce(
             ActionRequest(action_id="act-4", action_type="purchase", description="buy")
