@@ -257,6 +257,8 @@ class HttpSurfaceHandlers:
                     "title": deliverable_item.title,
                     "drive_file_id": deliverable_item.drive_file_id,
                     "share_url": deliverable_item.share_url,
+                    "parent_folder_id": deliverable_item.parent_folder_id,
+                    "access_mode": deliverable_item.access_mode,
                 },
             )
 
@@ -283,6 +285,8 @@ class HttpSurfaceHandlers:
                     "mime_type": item.mime_type,
                     "drive_file_id": item.drive_file_id,
                     "share_url": item.share_url,
+                    "parent_folder_id": item.parent_folder_id,
+                    "access_mode": item.access_mode,
                 }
                 for item in published
             ],

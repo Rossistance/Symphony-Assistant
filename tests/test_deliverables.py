@@ -63,6 +63,8 @@ class DeliverablePublisherTests(unittest.TestCase):
         self.assertEqual(published[0].mime_type, "text/markdown")
         self.assertTrue(published[0].drive_file_id.startswith("drv-task-1-artifact-1-"))
         self.assertIn("/plan.md", published[0].share_url)
+        self.assertIsNone(published[0].parent_folder_id)
+        self.assertEqual(published[0].access_mode, "view_only")
 
     def test_publish_is_stable_for_same_inputs(self):
         publisher = InMemoryDeliverablePublisher(drive_root="https://drive.local/files")
@@ -112,6 +114,8 @@ class DeliverablePublisherTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertTrue(first[0].share_url.startswith("drive://file/"))
         self.assertEqual(first[0].share_visibility, "private")
+        self.assertEqual(first[0].parent_folder_id, "folder-123")
+        self.assertEqual(first[0].access_mode, "private")
 
 
     def test_google_drive_uses_folder_policy_segments(self):

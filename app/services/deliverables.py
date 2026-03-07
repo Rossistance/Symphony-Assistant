@@ -36,6 +36,8 @@ class PublishedDeliverable:
     share_visibility: str
     permission_role: str
     permission_type: str
+    parent_folder_id: str | None = None
+    access_mode: str | None = None
     expiry_requested_hours: int | None = None
     expiry_applied: bool = False
 
@@ -201,6 +203,7 @@ class InMemoryDeliverablePublisher:
                 share_visibility="view_only",
                 permission_role="reader",
                 permission_type="anyone",
+                access_mode="view_only",
             )
             published.append(published_artifact)
 
@@ -267,6 +270,8 @@ class GoogleDriveDeliverablePublisher:
                     share_visibility=permission.visibility,
                     permission_role=permission.permission_role,
                     permission_type=permission.permission_type,
+                    parent_folder_id=resolved_folder.root_folder_id,
+                    access_mode=permission.visibility,
                     expiry_requested_hours=permission.expiry_requested_hours,
                     expiry_applied=permission.expiry_applied,
                 )
