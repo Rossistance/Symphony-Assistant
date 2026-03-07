@@ -1,21 +1,27 @@
 import unittest
 
-from app.api.approvals import DECISION_ROUTE, is_valid_approval_transition, post_approval_decision
+from app.api.approvals import (
+    APPROVAL_DECISION_PERMISSION,
+    AuthenticatedActorContext,
+    DECISION_ROUTE,
+    is_valid_approval_transition,
+    post_approval_decision,
+)
 from app.services.policy_engine import ActionPolicyEngine, ActionRequest, ApprovalStatus
 
 
 class ApprovalsApiTests(unittest.TestCase):
     @staticmethod
-    def _authorized_payload(*, actor: str, decision: str, can_decide_approvals: bool = True) -> dict[str, object]:
+    def _payload(*, actor: str, decision: str) -> dict[str, object]:
         return {
             "actor": actor,
             "decision": decision,
-            "auth": {
-                "authenticated": True,
-                "subject": actor,
-                "can_decide_approvals": can_decide_approvals,
-            },
         }
+
+    @staticmethod
+    def _authenticated_actor(*, subject: str, authenticated: bool = True, can_decide_approvals: bool = True) -> AuthenticatedActorContext:
+        permissions = frozenset({APPROVAL_DECISION_PERMISSION}) if can_decide_approvals else frozenset()
+        return AuthenticatedActorContext(subject=subject, authenticated=authenticated, permissions=permissions)
 
     def test_decision_route_constant_matches_contract(self):
         self.assertEqual(DECISION_ROUTE, "/api/v1/approvals/:id/decision")
@@ -43,6 +49,7 @@ class ApprovalsApiTests(unittest.TestCase):
         response = post_approval_decision(
             approval_id=result.approval_id or "",
             payload={"actor": "admin", "decision": "approved"},
+            authenticated_actor=self._authenticated_actor(subject="admin", authenticated=False),
             policy_engine=engine,
         )
 
@@ -57,7 +64,8 @@ class ApprovalsApiTests(unittest.TestCase):
 
         response = post_approval_decision(
             approval_id=result.approval_id or "",
-            payload=self._authorized_payload(actor="admin", decision="approved", can_decide_approvals=False),
+            payload=self._payload(actor="admin", decision="approved"),
+            authenticated_actor=self._authenticated_actor(subject="admin", can_decide_approvals=False),
             policy_engine=engine,
         )
 
@@ -72,15 +80,8 @@ class ApprovalsApiTests(unittest.TestCase):
 
         response = post_approval_decision(
             approval_id=result.approval_id or "",
-            payload={
-                "actor": "admin",
-                "decision": "approved",
-                "auth": {
-                    "authenticated": True,
-                    "subject": "other-admin",
-                    "can_decide_approvals": True,
-                },
-            },
+            payload=self._payload(actor="admin", decision="approved"),
+            authenticated_actor=self._authenticated_actor(subject="other-admin"),
             policy_engine=engine,
         )
 
@@ -95,7 +96,8 @@ class ApprovalsApiTests(unittest.TestCase):
 
         response = post_approval_decision(
             approval_id=result.approval_id,
-            payload=self._authorized_payload(actor="admin", decision="approved"),
+            payload=self._payload(actor="admin", decision="approved"),
+            authenticated_actor=self._authenticated_actor(subject="admin"),
             policy_engine=engine,
         )
 
@@ -114,6 +116,7 @@ class ApprovalsApiTests(unittest.TestCase):
         response = post_approval_decision(
             approval_id="approval-404",
             payload={"actor": "", "decision": "allow"},
+            authenticated_actor=self._authenticated_actor(subject="admin"),
             policy_engine=engine,
         )
 
@@ -128,12 +131,14 @@ class ApprovalsApiTests(unittest.TestCase):
 
         first_response = post_approval_decision(
             approval_id=result.approval_id or "",
-            payload=self._authorized_payload(actor="admin", decision="approved"),
+            payload=self._payload(actor="admin", decision="approved"),
+            authenticated_actor=self._authenticated_actor(subject="admin"),
             policy_engine=engine,
         )
         duplicate_response = post_approval_decision(
             approval_id=result.approval_id or "",
-            payload=self._authorized_payload(actor="admin", decision="approved"),
+            payload=self._payload(actor="admin", decision="approved"),
+            authenticated_actor=self._authenticated_actor(subject="admin"),
             policy_engine=engine,
         )
 
@@ -151,12 +156,14 @@ class ApprovalsApiTests(unittest.TestCase):
 
         first_response = post_approval_decision(
             approval_id=result.approval_id or "",
-            payload=self._authorized_payload(actor="admin", decision="rejected"),
+            payload=self._payload(actor="admin", decision="rejected"),
+            authenticated_actor=self._authenticated_actor(subject="admin"),
             policy_engine=engine,
         )
         duplicate_response = post_approval_decision(
             approval_id=result.approval_id or "",
-            payload=self._authorized_payload(actor="admin", decision="rejected"),
+            payload=self._payload(actor="admin", decision="rejected"),
+            authenticated_actor=self._authenticated_actor(subject="admin"),
             policy_engine=engine,
         )
 
@@ -165,6 +172,30 @@ class ApprovalsApiTests(unittest.TestCase):
         self.assertEqual(duplicate_response.body["from_status"], "rejected")
         self.assertEqual(duplicate_response.body["to_status"], "rejected")
         self.assertEqual(len(engine.audit_trail), 1)
+
+    def test_post_approval_decision_ignores_payload_auth_tampering(self):
+        engine = ActionPolicyEngine()
+        result = engine.enforce(
+            ActionRequest(action_id="act-17", action_type="credential_change", description="rotate key")
+        )
+
+        response = post_approval_decision(
+            approval_id=result.approval_id or "",
+            payload={
+                "actor": "admin",
+                "decision": "approved",
+                "auth": {
+                    "authenticated": True,
+                    "subject": "admin",
+                    "can_decide_approvals": True,
+                },
+            },
+            authenticated_actor=self._authenticated_actor(subject="admin", can_decide_approvals=False),
+            policy_engine=engine,
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.body["error"], "missing approval decision permission")
 
 
 if __name__ == "__main__":

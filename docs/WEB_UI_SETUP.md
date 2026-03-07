@@ -138,6 +138,7 @@ Use these endpoints as contracts in your collection:
 - `POST /jobs/daily-suggestion`
 - `GET /api/v1/tasks/:id`
 - `POST /api/v1/approvals/:id/decision`
+  - Route integration note: HTTP middleware must pass trusted auth context (subject/authenticated/permissions) to the handler separately from JSON payload; do not trust a payload `auth` object.
 
 This is often the quickest way to “operate via web UI” immediately.
 

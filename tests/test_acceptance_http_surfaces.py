@@ -4,7 +4,12 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from app.api.approvals import DECISION_ROUTE, post_approval_decision
+from app.api.approvals import (
+    APPROVAL_DECISION_PERMISSION,
+    AuthenticatedActorContext,
+    DECISION_ROUTE,
+    post_approval_decision,
+)
 from app.config import DeliverablesConfig
 from app.api.http_surfaces import (
     DAILY_SUGGESTION_ROUTE,
@@ -341,12 +346,12 @@ class AcceptanceApprovalDecisionTests(unittest.TestCase):
             payload={
                 "actor": "ops",
                 "decision": "approved",
-                "auth": {
-                    "authenticated": True,
-                    "subject": "ops",
-                    "can_decide_approvals": True,
-                },
             },
+            authenticated_actor=AuthenticatedActorContext(
+                subject="ops",
+                authenticated=True,
+                permissions=frozenset({APPROVAL_DECISION_PERMISSION}),
+            ),
             policy_engine=engine,
         )
 
