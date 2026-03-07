@@ -98,7 +98,8 @@ class SimulationStateStore:
                 {"role": "user", "content": prompt or "Generate execution summary and return payload."},
             ],
             "temperature": 0.2,
-            "max_tokens": 512,
+            "max_completion_tokens": 512,
+            "user": task_id,
         }
         req = urllib.request.Request(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -126,7 +127,13 @@ class SimulationStateStore:
         content = str(message.get("content") or "").strip()
         if not content:
             raise ValueError("Groq returned empty content")
-        return {"provider": "groq", "content": content}
+        x_groq = payload.get("x_groq") or {}
+        return {
+            "provider": "groq",
+            "content": content,
+            "request_id": str(x_groq.get("id") or ""),
+            "model": str(payload.get("model") or model_name),
+        }
 
     def apply_agent_simulation(
         self,
@@ -144,6 +151,8 @@ class SimulationStateStore:
             sub_summary = "Sub-agent compiled return handling checklist and status updates."
             model_summary = "Groq disabled for this run."
             provider_used = "none"
+            provider_request_id = ""
+            provider_model = ""
 
             if use_groq:
                 if use_real_groq_api:
@@ -151,6 +160,8 @@ class SimulationStateStore:
                         generated = self._call_real_groq(prompt=prompt, task_id=str(self._state["task_id"]))
                         model_summary = generated["content"]
                         provider_used = generated["provider"]
+                        provider_request_id = generated.get("request_id", "")
+                        provider_model = generated.get("model", "")
                     except ValueError:
                         if require_groq:
                             self._state["error"] = "Real Groq API call failed or GROQ_API_KEY missing/invalid"
@@ -198,6 +209,8 @@ class SimulationStateStore:
                         "status": "synthesized",
                         "detail": model_summary,
                         "provider": provider_used,
+                        "provider_model": provider_model,
+                        "provider_request_id": provider_request_id,
                     },
                     {"agent": "lead", "status": "completed", "detail": "Ready for orchestration approval."},
                 ]

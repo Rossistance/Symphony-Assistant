@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -190,12 +191,33 @@ class InMemoryDeliverablePublisher:
     """Deterministic in-memory publisher used by tests and local adapters."""
 
     drive_root: str = "https://drive.example/files"
+    local_output_dir: Path = field(
+        default_factory=lambda: Path(os.getenv("DELIVERABLES_LOCAL_OUTPUT_DIR", "deliverables"))
+    )
     _records: dict[str, list[PublishedDeliverable]] = field(default_factory=dict)
+
+    def _ensure_local_artifact(self, *, task_id: str, artifact: DeliverableArtifact) -> Path:
+        task_dir = self.local_output_dir / task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+
+        source = Path(artifact.source_ref)
+        destination = task_dir / (source.name or f"{artifact.artifact_id}.txt")
+        if source.exists():
+            if source.resolve() != destination.resolve():
+                shutil.copyfile(source, destination)
+            return destination
+
+        destination.write_text(
+            f"Artifact {artifact.title} was published for task {task_id}.",
+            encoding="utf-8",
+        )
+        return destination
 
     def publish(self, *, task_id: str, artifacts: list[DeliverableArtifact]) -> list[PublishedDeliverable]:
         published: list[PublishedDeliverable] = []
         for artifact in artifacts:
             safe_name = Path(artifact.source_ref).name or artifact.artifact_id
+            local_path = self._ensure_local_artifact(task_id=task_id, artifact=artifact)
             seed = f"{task_id}:{artifact.artifact_id}:{safe_name}:{artifact.mime_type}".encode("utf-8")
             token = hashlib.sha256(seed).hexdigest()[:12]
             drive_file_id = f"drv-{task_id}-{artifact.artifact_id}-{token}"
@@ -207,7 +229,7 @@ class InMemoryDeliverablePublisher:
                     mime_type=artifact.mime_type,
                     drive_file_id=drive_file_id,
                     share_url=url,
-                    access_reference=url,
+                    access_reference=str(local_path),
                     share_visibility="view_only",
                     permission_role="reader",
                     permission_type="anyone",

@@ -65,6 +65,7 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         import os
 
         os.environ["MESSAGING_STATE_DB_PATH"] = str(Path(self.temp_dir.name) / "messaging_state.db")
+        os.environ["DELIVERABLES_LOCAL_OUTPUT_DIR"] = str(Path(self.temp_dir.name) / "deliverables")
         get_runtime_state_store.cache_clear()
         self.handlers = HttpSurfaceHandlers(
             runtime=AgentRuntime(clock=lambda: 0),
@@ -74,6 +75,9 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         )
 
     def tearDown(self):
+        import os
+
+        os.environ.pop("DELIVERABLES_LOCAL_OUTPUT_DIR", None)
         self.temp_dir.cleanup()
 
     def test_contract_routes_exist(self):
@@ -111,6 +115,9 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         self.assertEqual(response.body["deliverable"], "Release summary v1")
         self.assertEqual(len(response.body["deliverables"]), 1)
         self.assertTrue(response.body["deliverables"][0]["share_url"].startswith("https://drive.example/files/"))
+        local_file = Path(response.body["deliverables"][0]["access_reference"])
+        self.assertTrue(local_file.exists())
+        self.assertEqual(local_file.read_text(encoding="utf-8"), "Release summary v1")
         self.assertIsNone(response.body["deliverables"][0]["parent_folder_id"])
         self.assertEqual(response.body["deliverables"][0]["access_mode"], "view_only")
         self.assertEqual(response.body["deliverables"][0]["permission_role"], "reader")
