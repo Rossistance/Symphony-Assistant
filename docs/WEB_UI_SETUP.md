@@ -196,3 +196,100 @@ If you want a practical progression with minimal risk:
 3. **Next:** add observability panels and artifact link previews.
 
 This gives immediate usability without blocking on full product UI design.
+
+
+## 6) New local workflow simulator UI (5 interactive windows)
+
+A lightweight browser-based simulator is now available for local testing of the intended flow:
+
+- WhatsApp initiation
+- Agent/sub-agent task execution updates
+- Approval decision
+- Simulated Drive folder/file placement
+- WhatsApp return reply
+
+Run the Flask app:
+
+```bash
+python -m app.main
+```
+
+Open:
+
+- `http://localhost:8000/simulator`
+
+Notes:
+
+- Simulator state is mirrored to a temp JSON file and also cached in browser `sessionStorage`.
+- Browser close/reset calls clear simulator state.
+- The simulator now supports automatic end-to-end flow from WhatsApp initiation through agent, approval, drive publish, and WhatsApp return via the `Auto-run full workflow` control.
+- The agent pane can be configured to require `GROQ_API_KEY` and fail fast if missing, so you can verify a real key-backed model step in the chain.
+
+
+## 7) One-shot install + run command (recommended)
+
+From repo root, run:
+
+```bash
+bash scripts/run_local_simulator.sh
+```
+
+What this does:
+
+1. Creates `.venv` (if missing)
+2. Installs/updates `pip`
+3. Installs `flask` and `pytest`
+4. Starts the app and serves simulator UI at `http://localhost:8000/simulator`
+
+Optional with Groq + custom port:
+
+```bash
+GROQ_API_KEY="your_real_groq_key" PORT=8000 bash scripts/run_local_simulator.sh
+```
+
+If you prefer manual commands instead of the script:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install flask pytest
+python -m app.main
+```
+
+## 8) Windows PowerShell (no WSL) — exact commands
+
+If you are running from **Windows PowerShell**, use the PowerShell script (not the bash script):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_local_simulator.ps1
+```
+
+Optional with Groq + custom port:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_local_simulator.ps1 -Port 8000 -GroqApiKey "your_real_groq_key"
+```
+
+Manual PowerShell commands (if you prefer no script):
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\python.exe -m ensurepip --upgrade
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install flask pytest
+$env:PORT="8000"
+$env:GROQ_API_KEY="your_real_groq_key"   # optional
+.\.venv\Scripts\python.exe -m app.main
+```
+
+### Common Windows errors and fixes
+
+- `source: The term 'source' is not recognized...`
+  - `source` is a bash command. In PowerShell, either run `.\.venv\Scripts\Activate.ps1` or call `.\.venv\Scripts\python.exe` directly.
+- `No module named pip`
+  - Use `py -m venv .venv`, then run `.\.venv\Scripts\python.exe -m ensurepip --upgrade` before pip install.
+- `wsl: Failed to translate ...`
+  - You are invoking a Linux/bash flow from Windows paths. Use `run_local_simulator.ps1` for native Windows execution.
+- `No module named 'flask'`
+  - Install with `.\.venv\Scripts\python.exe -m pip install flask pytest` and run app with the same interpreter.
