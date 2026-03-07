@@ -87,18 +87,9 @@ class HttpSurfaceHandlers:
         except WebhookValidationError as exc:
             return ApiResponse(status_code=422, body=exc.to_response_body())
 
-        assert self.inbound_pipeline is not None
-        ingestion_result = self.inbound_pipeline.ingest(inbound, source="webhook.whatsapp")
-        if not ingestion_result.accepted:
-            return ApiResponse(
-                status_code=202,
-                body={
-                    "accepted": True,
-                    "duplicate": True,
-                    "provider_message_id": inbound.provider_message_id,
-                    "provider_thread_id": inbound.provider_thread_id,
-                },
-            )
+        response = self.ingest_gateway_inbound(inbound, source="webhook.whatsapp")
+        if response.body["duplicate"]:
+            return response
 
         reply_text = "Received. Processing your request."
         self._emit(
@@ -110,17 +101,10 @@ class HttpSurfaceHandlers:
                 "text": reply_text,
             },
         )
-        return ApiResponse(
-            status_code=202,
-            body={
-                "accepted": True,
-                "provider_message_id": inbound.provider_message_id,
-                "provider_thread_id": inbound.provider_thread_id,
-            },
-        )
+        return response
 
     def ingest_gateway_inbound(self, inbound: InboundMessage, *, source: str = "gateway.socket") -> ApiResponse:
-        """Accept normalized inbound events from gateway socket callbacks."""
+        """Accept normalized inbound events from webhook handlers or gateway callbacks."""
 
         assert self.inbound_pipeline is not None
         ingestion_result = self.inbound_pipeline.ingest(inbound, source=source)

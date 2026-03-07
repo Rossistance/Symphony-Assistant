@@ -5,6 +5,7 @@ from app.messaging.inbound_pipeline import (
     InboundDedupeStore,
     InboundIngestionPipeline,
     InboundIngestionResult,
+    FileInboundDedupeStore,
     InMemoryInboundDedupeStore,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "InboundDedupeStore",
     "InboundIngestionPipeline",
     "InboundIngestionResult",
+    "FileInboundDedupeStore",
     "InMemoryInboundDedupeStore",
 ]
