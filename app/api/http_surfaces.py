@@ -14,6 +14,7 @@ from app.messaging.runtime_state import get_runtime_state_store
 from app.services.deliverables import (
     DeliverableArtifact,
     DeliverablePublisher,
+    DeliverablePublisherError,
     DeliverablePublisherConfigError,
     DeliverablePublisherCredentialError,
     create_deliverable_publisher,
@@ -92,6 +93,57 @@ class HttpSurfaceHandlers:
 
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         self.events.append({"event_type": normalize_event_type(event_type), "payload": payload})
+
+    def _publish_failure_response(
+        self,
+        *,
+        task_id: str,
+        deliverable: str,
+        mode: OrchestrationMode,
+        delegation_mode: str,
+        plan_stages: list[list[str]],
+        reason_code: str,
+        error: str,
+        error_type: str,
+        error_message: str,
+        status_code: int = 500,
+    ) -> ApiResponse:
+        status = "failed"
+        self._emit(
+            "deliverable.publish.failed",
+            {
+                "task_id": task_id,
+                "correlation_id": task_id,
+                "status": status,
+                "reason_code": reason_code,
+                "error_type": error_type,
+                "error_message": error_message,
+            },
+        )
+        self._emit(
+            "task.status.updated",
+            {
+                "task_id": task_id,
+                "correlation_id": task_id,
+                "status": status,
+                "reason_code": reason_code,
+            },
+        )
+        task_payload = {
+            "task_id": task_id,
+            "status": status,
+            "deliverable": deliverable,
+            "deliverables": [],
+            "completion_message": "I couldn't publish your deliverable. Please retry after fixing the publish issue.",
+            "execution_mode": mode.value,
+            "delegation_mode": delegation_mode,
+            "delegation_stages": plan_stages,
+            "failure_reason_code": reason_code,
+            "error": error,
+            "message": error_message,
+        }
+        self.tasks.put(task_id, task_payload)
+        return ApiResponse(status_code=status_code, body=task_payload)
 
     def post_webhooks_whatsapp(self, payload: dict[str, Any]) -> ApiResponse:
         try:
@@ -212,41 +264,57 @@ class HttpSurfaceHandlers:
             ]
 
         assert self.deliverable_publisher is not None
+        mode = detect_execution_mode(prompt)
+
         try:
             published = self.deliverable_publisher.publish(task_id=task_id, artifacts=artifacts)
         except DeliverablePublisherConfigError as exc:
-            self._emit(
-                "deliverable.publish.failed",
-                {
-                    "task_id": task_id,
-                    "error_type": "config",
-                    "error_message": str(exc),
-                },
-            )
-            return ApiResponse(
-                status_code=500,
-                body={
-                    "error": "deliverable_publish_config_error",
-                    "message": str(exc),
-                    "task_id": task_id,
-                },
+            return self._publish_failure_response(
+                task_id=task_id,
+                deliverable=deliverable,
+                mode=mode,
+                delegation_mode=plan.mode.value,
+                plan_stages=plan.stages,
+                reason_code="deliverable_publish_config_error",
+                error="deliverable_publish_config_error",
+                error_type="config",
+                error_message=str(exc),
             )
         except DeliverablePublisherCredentialError as exc:
-            self._emit(
-                "deliverable.publish.failed",
-                {
-                    "task_id": task_id,
-                    "error_type": "credentials",
-                    "error_message": str(exc),
-                },
+            return self._publish_failure_response(
+                task_id=task_id,
+                deliverable=deliverable,
+                mode=mode,
+                delegation_mode=plan.mode.value,
+                plan_stages=plan.stages,
+                reason_code="deliverable_publish_credential_error",
+                error="deliverable_publish_credential_error",
+                error_type="credentials",
+                error_message=str(exc),
             )
-            return ApiResponse(
-                status_code=500,
-                body={
-                    "error": "deliverable_publish_credential_error",
-                    "message": str(exc),
-                    "task_id": task_id,
-                },
+        except DeliverablePublisherError as exc:
+            return self._publish_failure_response(
+                task_id=task_id,
+                deliverable=deliverable,
+                mode=mode,
+                delegation_mode=plan.mode.value,
+                plan_stages=plan.stages,
+                reason_code="deliverable_publish_failed",
+                error="deliverable_publish_failed",
+                error_type="publish",
+                error_message=str(exc),
+            )
+        except Exception as exc:
+            return self._publish_failure_response(
+                task_id=task_id,
+                deliverable=deliverable,
+                mode=mode,
+                delegation_mode=plan.mode.value,
+                plan_stages=plan.stages,
+                reason_code="deliverable_publish_unexpected_error",
+                error="deliverable_publish_unexpected_error",
+                error_type="unexpected",
+                error_message=str(exc),
             )
         for deliverable_item in published:
             self._emit(
@@ -273,7 +341,6 @@ class HttpSurfaceHandlers:
             },
         )
 
-        mode = detect_execution_mode(prompt)
         task_payload = {
             "task_id": task_id,
             "status": "completed",
