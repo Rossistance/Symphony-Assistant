@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from app.api.approvals import DECISION_ROUTE, post_approval_decision
+from app.config import DeliverablesConfig
 from app.api.http_surfaces import (
     DAILY_SUGGESTION_ROUTE,
     ORCHESTRATE_JOB_ROUTE,
@@ -17,6 +18,7 @@ from app.messaging.agent_bus import AgentMessageBroker
 from app.messaging.base import InboundMessage
 from app.messaging.runtime_state import get_runtime_state_store
 from app.services.agent_runtime import AgentRuntime
+from app.services.deliverables import InMemoryDeliverablePublisher
 from app.services.model_routing import ModelResponse, RoutedModelClient, TransientProviderError
 from app.services.policy_engine import ActionPolicyEngine, ActionRequest
 
@@ -90,6 +92,45 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         lookup = self.handlers.get_api_v1_tasks_id("task-deliverable")
         self.assertEqual(lookup.status_code, 200)
         self.assertEqual(lookup.body["task_id"], "task-deliverable")
+
+
+    def test_defaults_deliverable_publisher_from_config(self):
+        handlers = HttpSurfaceHandlers(
+            runtime=AgentRuntime(clock=lambda: 0),
+            message_bus=AgentMessageBroker(),
+            tasks=TaskStore.create(),
+            deliverables_config=DeliverablesConfig(
+                backend="in_memory",
+                in_memory_drive_root="https://drive.configured/files",
+                google_drive_folder_id="",
+            ),
+        )
+
+        self.assertIsInstance(handlers.deliverable_publisher, InMemoryDeliverablePublisher)
+        assert handlers.deliverable_publisher is not None
+        self.assertEqual(handlers.deliverable_publisher.drive_root, "https://drive.configured/files")
+
+    def test_orchestrate_returns_actionable_error_when_drive_credentials_missing(self):
+        import os
+
+        os.environ.pop("GOOGLE_DRIVE_CREDENTIALS_JSON", None)
+        handlers = HttpSurfaceHandlers(
+            runtime=AgentRuntime(clock=lambda: 0),
+            message_bus=AgentMessageBroker(),
+            tasks=TaskStore.create(),
+            deliverables_config=DeliverablesConfig(
+                backend="google_drive",
+                in_memory_drive_root="https://drive.example/files",
+                google_drive_folder_id="folder-123",
+            ),
+        )
+
+        response = handlers.post_jobs_orchestrate({"task_id": "task-cred", "prompt": "draft plan"})
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.body["error"], "deliverable_publish_credential_error")
+        self.assertEqual(handlers.events[-1]["event_type"], "deliverable.publish.failed")
+        self.assertEqual(handlers.events[-1]["payload"]["error_type"], "credentials")
 
     def test_swarm_spawn_and_message_synthesis_events(self):
         response = self.handlers.post_jobs_orchestrate(

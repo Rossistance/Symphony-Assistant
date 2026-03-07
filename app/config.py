@@ -39,6 +39,15 @@ class ModelRouterConfig:
     max_retries: int = int(os.getenv("MODEL_PROVIDER_MAX_RETRIES", "2"))
 
 
+
+@dataclass(frozen=True)
+class DeliverablesConfig:
+    """Configuration for deliverable publication backend selection."""
+
+    backend: str = os.getenv("DELIVERABLES_BACKEND", "in_memory")
+    in_memory_drive_root: str = os.getenv("DELIVERABLES_IN_MEMORY_DRIVE_ROOT", "https://drive.example/files")
+    google_drive_folder_id: str = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+
 @dataclass(frozen=True)
 class OrchestratorConfig:
     """Policy controls for lead-agent autonomy and slow-mode handling."""
@@ -54,3 +63,5 @@ class OrchestratorConfig:
 config = MessagingConfig()
 model_config = ModelRouterConfig()
 orchestrator_config = OrchestratorConfig()
+
+deliverables_config = DeliverablesConfig()

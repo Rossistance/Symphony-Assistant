@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from itertools import count
 from typing import Any
 
+from app.config import DeliverablesConfig
 from app.messaging.agent_bus import AgentMessageBroker
 from app.messaging.base import InboundMessage
 from app.messaging.inbound_pipeline import InboundIngestionPipeline
@@ -13,7 +14,9 @@ from app.messaging.runtime_state import get_runtime_state_store
 from app.services.deliverables import (
     DeliverableArtifact,
     DeliverablePublisher,
-    InMemoryDeliverablePublisher,
+    DeliverablePublisherConfigError,
+    DeliverablePublisherCredentialError,
+    create_deliverable_publisher,
     compose_completion_message,
 )
 from app.services.agent_runtime import AgentRuntime, DelegationTask
@@ -63,13 +66,18 @@ class HttpSurfaceHandlers:
     message_bus: AgentMessageBroker
     tasks: TaskStore
     deliverable_publisher: DeliverablePublisher | None = None
+    deliverables_config: DeliverablesConfig = DeliverablesConfig()
     inbound_pipeline: InboundIngestionPipeline | None = None
 
     def __post_init__(self) -> None:
         self.events: list[dict[str, Any]] = []
         self._ids = count(1)
         if self.deliverable_publisher is None:
-            self.deliverable_publisher = InMemoryDeliverablePublisher()
+            self.deliverable_publisher = create_deliverable_publisher(
+                backend=self.deliverables_config.backend,
+                drive_root=self.deliverables_config.in_memory_drive_root,
+                google_drive_folder_id=self.deliverables_config.google_drive_folder_id,
+            )
         if self.inbound_pipeline is None:
             self.inbound_pipeline = InboundIngestionPipeline(
                 dedupe_store=get_runtime_state_store(),
@@ -198,7 +206,42 @@ class HttpSurfaceHandlers:
             ]
 
         assert self.deliverable_publisher is not None
-        published = self.deliverable_publisher.publish(task_id=task_id, artifacts=artifacts)
+        try:
+            published = self.deliverable_publisher.publish(task_id=task_id, artifacts=artifacts)
+        except DeliverablePublisherConfigError as exc:
+            self._emit(
+                "deliverable.publish.failed",
+                {
+                    "task_id": task_id,
+                    "error_type": "config",
+                    "error_message": str(exc),
+                },
+            )
+            return ApiResponse(
+                status_code=500,
+                body={
+                    "error": "deliverable_publish_config_error",
+                    "message": str(exc),
+                    "task_id": task_id,
+                },
+            )
+        except DeliverablePublisherCredentialError as exc:
+            self._emit(
+                "deliverable.publish.failed",
+                {
+                    "task_id": task_id,
+                    "error_type": "credentials",
+                    "error_message": str(exc),
+                },
+            )
+            return ApiResponse(
+                status_code=500,
+                body={
+                    "error": "deliverable_publish_credential_error",
+                    "message": str(exc),
+                    "task_id": task_id,
+                },
+            )
         for deliverable_item in published:
             self._emit(
                 "deliverable.published",

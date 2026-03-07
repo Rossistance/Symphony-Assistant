@@ -2,8 +2,12 @@ import unittest
 
 from app.services.deliverables import (
     DeliverableArtifact,
+    DeliverablePublisherConfigError,
+    DeliverablePublisherCredentialError,
+    GoogleDriveDeliverablePublisher,
     InMemoryDeliverablePublisher,
     compose_completion_message,
+    create_deliverable_publisher,
 )
 
 
@@ -29,6 +33,97 @@ class DeliverablePublisherTests(unittest.TestCase):
         self.assertEqual(published[0].mime_type, "text/markdown")
         self.assertTrue(published[0].drive_file_id.startswith("drv-task-1-artifact-1-"))
         self.assertIn("/plan.md", published[0].share_url)
+
+    def test_publish_is_stable_for_same_inputs(self):
+        publisher = InMemoryDeliverablePublisher(drive_root="https://drive.local/files")
+        artifacts = [
+            DeliverableArtifact(
+                artifact_id="artifact-1",
+                title="Plan",
+                mime_type="text/markdown",
+                source_ref="tmp/plan.md",
+            )
+        ]
+
+        first = publisher.publish(task_id="task-1", artifacts=artifacts)
+        second = publisher.publish(task_id="task-1", artifacts=artifacts)
+
+        self.assertEqual(first, second)
+
+    def test_google_drive_publish_is_stable_for_same_inputs(self):
+        publisher = GoogleDriveDeliverablePublisher(
+            folder_id="folder-123",
+            credentials_json='{"client_email": "svc@example.com"}',
+        )
+
+        first = publisher.publish(
+            task_id="task-1",
+            artifacts=[
+                DeliverableArtifact(
+                    artifact_id="artifact-1",
+                    title="Plan",
+                    mime_type="text/markdown",
+                    source_ref="tmp/plan.md",
+                )
+            ],
+        )
+        second = publisher.publish(
+            task_id="task-1",
+            artifacts=[
+                DeliverableArtifact(
+                    artifact_id="artifact-1",
+                    title="Plan",
+                    mime_type="text/markdown",
+                    source_ref="tmp/plan.md",
+                )
+            ],
+        )
+
+        self.assertEqual(first, second)
+        self.assertTrue(first[0].share_url.startswith("https://drive.google.com/file/d/"))
+
+    def test_google_drive_publish_requires_credentials_json(self):
+        publisher = GoogleDriveDeliverablePublisher(folder_id="folder-123")
+
+        with self.assertRaises(DeliverablePublisherCredentialError):
+            publisher.publish(
+                task_id="task-1",
+                artifacts=[
+                    DeliverableArtifact(
+                        artifact_id="artifact-1",
+                        title="Plan",
+                        mime_type="text/markdown",
+                        source_ref="tmp/plan.md",
+                    )
+                ],
+            )
+
+    def test_google_drive_publish_requires_folder_id(self):
+        publisher = GoogleDriveDeliverablePublisher(
+            folder_id="",
+            credentials_json='{"client_email": "svc@example.com"}',
+        )
+
+        with self.assertRaises(DeliverablePublisherConfigError):
+            publisher.publish(
+                task_id="task-1",
+                artifacts=[
+                    DeliverableArtifact(
+                        artifact_id="artifact-1",
+                        title="Plan",
+                        mime_type="text/markdown",
+                        source_ref="tmp/plan.md",
+                    )
+                ],
+            )
+
+    def test_create_publisher_rejects_unknown_backend(self):
+        with self.assertRaises(DeliverablePublisherConfigError):
+            create_deliverable_publisher(
+                backend="unsupported",
+                drive_root="https://drive.local/files",
+                google_drive_folder_id="folder-123",
+            )
 
     def test_completion_message_contains_links(self):
         publisher = InMemoryDeliverablePublisher(drive_root="https://drive.local/files")
