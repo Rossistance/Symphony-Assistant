@@ -34,6 +34,8 @@ class SimulatorUiTests(unittest.TestCase):
 
     def tearDown(self):
         os.environ.pop("GROQ_API_KEY", None)
+        os.environ.pop("GROK_API_KEY", None)
+        os.environ.pop("XAI_API_KEY", None)
         self.temp_dir.cleanup()
 
     def test_simulator_page_renders(self):
@@ -52,21 +54,13 @@ class SimulatorUiTests(unittest.TestCase):
         self.assertEqual(initialized.status_code, 200)
         self.assertEqual(initialized.get_json()["status"], "initiated")
 
-        ran = self.client.post("/simulator/api/agent-run", json={"use_groq": False})
+        ran = self.client.post("/simulator/api/agent-run", json={"use_grok": False})
         self.assertEqual(ran.status_code, 200)
         run_payload = ran.get_json()
-        self.assertEqual(run_payload["status"], "awaiting_approval")
+        self.assertEqual(run_payload["status"], "completed")
+        self.assertEqual(run_payload["approval"]["status"], "approved")
         self.assertTrue(run_payload["agent"]["events"])
-
-        approved = self.client.post("/simulator/api/approve", json={"approved": True, "note": "Ship it."})
-        self.assertEqual(approved.status_code, 200)
-        self.assertEqual(approved.get_json()["approval"]["status"], "approved")
-
-        published = self.client.post("/simulator/api/publish", json={})
-        self.assertEqual(published.status_code, 200)
-        publish_payload = published.get_json()
-        self.assertEqual(publish_payload["status"], "completed")
-        self.assertIn("https://drive.example/simulated", publish_payload["return_message"])
+        self.assertIn("Deliverable saved at", run_payload["return_message"])
 
     def test_simulator_auto_run_happy_path(self):
         response = self.client.post(
@@ -75,8 +69,8 @@ class SimulatorUiTests(unittest.TestCase):
                 "phone": "+15551230000",
                 "message": "Auto process this return.",
                 "auto_process": True,
-                "use_groq": False,
-                "require_groq": False,
+                "use_grok": False,
+                "require_grok": False,
                 "approval_note": "Auto approval.",
             },
         )
@@ -88,17 +82,17 @@ class SimulatorUiTests(unittest.TestCase):
         self.assertIn("Done — I completed", payload["return_message"])
         self.assertTrue(payload["drive"]["files"])
 
-    def test_simulator_requires_groq_when_requested(self):
+    def test_simulator_requires_grok_when_requested(self):
         self.client.post(
             "/simulator/api/whatsapp-init",
             json={"phone": "+15551230000", "message": "Please process this return.", "auto_process": False},
         )
 
-        response = self.client.post("/simulator/api/agent-run", json={"use_groq": True, "require_groq": True})
+        response = self.client.post("/simulator/api/agent-run", json={"use_grok": True, "require_grok": True})
         self.assertEqual(response.status_code, 400)
         payload = response.get_json()
         self.assertEqual(payload["status"], "failed")
-        self.assertIn("GROQ_API_KEY", payload["error"])
+        self.assertIn("GROK_API_KEY", payload["error"])
 
     def test_simulator_publish_requires_approval(self):
         self.client.post(

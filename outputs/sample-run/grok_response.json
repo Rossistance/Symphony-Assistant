@@ -1,0 +1,4 @@
+{
+  "provider": "grok",
+  "note": "Sample artifact. Real runs overwrite this under outputs/<task_id>/"
+}
