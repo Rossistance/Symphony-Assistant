@@ -50,6 +50,17 @@ def _first_present(payload: dict[str, Any], candidates: tuple[str, ...]) -> tupl
     return None, None
 
 
+def _normalize_identifier(value: Any) -> str | None:
+    """Return a stable identifier for deduplication when possible."""
+
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return normalized
+
+
 def _validate_payload(payload: dict[str, Any]) -> None:
     errors: list[dict[str, str]] = []
 
@@ -100,15 +111,20 @@ def parse_inbound_webhook(payload: dict[str, Any], *, channel: str) -> InboundMe
     _validate_payload(payload)
 
     # Common aliases across Twilio/WhatsApp/iOS bridge payloads.
-    provider_message_id = payload.get("message_id") or payload.get("MessageSid") or payload.get("id")
-    provider_thread_id = (
+    provider_message_id = _normalize_identifier(
+        payload.get("message_id") or payload.get("MessageSid") or payload.get("id")
+    )
+    provider_thread_id = _normalize_identifier(
         payload.get("thread_id")
         or payload.get("context_id")
         or payload.get("conversation_id")
         or payload.get("WaId")
     )
-    from_user = payload.get("from") or payload.get("From") or payload.get("sender")
-    body = payload.get("body") or payload.get("Body") or payload.get("text") or ""
+    from_user = str(payload.get("from") or payload.get("From") or payload.get("sender") or "").strip()
+    body = str(payload.get("body") or payload.get("Body") or payload.get("text") or "").strip()
+
+    metadata = dict(payload)
+    metadata["stable_provider_id"] = provider_message_id
 
     return InboundMessage(
         channel=channel,
@@ -116,5 +132,5 @@ def parse_inbound_webhook(payload: dict[str, Any], *, channel: str) -> InboundMe
         body=body,
         provider_message_id=provider_message_id,
         provider_thread_id=provider_thread_id,
-        metadata=payload,
+        metadata=metadata,
     )
