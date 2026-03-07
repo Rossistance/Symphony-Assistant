@@ -85,7 +85,8 @@ class SimulatorUiTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(payload["status"], "completed")
         self.assertEqual(payload["approval"]["status"], "approved")
-        self.assertIn("Your return is ready", payload["return_message"])
+        self.assertIn("Done — I completed", payload["return_message"])
+        self.assertTrue(payload["drive"]["files"])
 
     def test_simulator_requires_groq_when_requested(self):
         self.client.post(

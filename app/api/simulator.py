@@ -7,10 +7,13 @@ import os
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.api.http_surfaces import ApiResponse
 from app.services.model_runtime import generate_response
 
 
@@ -82,10 +85,60 @@ class SimulationStateStore:
             self._persist()
             return self.snapshot()
 
-    def apply_agent_simulation(self, *, use_groq: bool, require_groq: bool = False) -> dict[str, Any]:
+    def _call_real_groq(self, *, prompt: str, task_id: str) -> dict[str, str]:
+        api_key = os.getenv("GROQ_API_KEY", "").strip()
+        if not api_key:
+            raise ValueError("GROQ_API_KEY is required for real Groq mode")
+
+        model_name = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+        body = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": "You are a lead orchestration agent. Return concise task output."},
+                {"role": "user", "content": prompt or "Generate execution summary and return payload."},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 512,
+        }
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/chat/completions",
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+                "X-Run-Id": task_id,
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else str(exc)
+            raise ValueError(f"Groq request failed ({exc.code}): {raw}") from exc
+        except urllib.error.URLError as exc:
+            raise ValueError(f"Groq connection error: {exc.reason}") from exc
+
+        choices = payload.get("choices") or []
+        if not choices:
+            raise ValueError("Groq returned no choices")
+        message = choices[0].get("message", {})
+        content = str(message.get("content") or "").strip()
+        if not content:
+            raise ValueError("Groq returned empty content")
+        return {"provider": "groq", "content": content}
+
+    def apply_agent_simulation(
+        self,
+        *,
+        use_groq: bool,
+        require_groq: bool = False,
+        use_real_groq_api: bool = True,
+    ) -> dict[str, Any]:
         with self._lock:
             if not self._state["task_id"]:
                 raise ValueError("No simulation task has been started")
+
             prompt = str(self._state.get("prompt") or "")
             lead_summary = "Lead agent decomposed request into retrieval + response workstreams."
             sub_summary = "Sub-agent compiled return handling checklist and status updates."
@@ -93,21 +146,41 @@ class SimulationStateStore:
             provider_used = "none"
 
             if use_groq:
-                if not os.getenv("GROQ_API_KEY"):
-                    if require_groq:
+                if use_real_groq_api:
+                    try:
+                        generated = self._call_real_groq(prompt=prompt, task_id=str(self._state["task_id"]))
+                        model_summary = generated["content"]
+                        provider_used = generated["provider"]
+                    except ValueError:
+                        if require_groq:
+                            self._state["error"] = "Real Groq API call failed or GROQ_API_KEY missing/invalid"
+                            self._state["status"] = "failed"
+                            self._persist()
+                            raise
+                        generated = generate_response(
+                            messages=[
+                                {"role": "system", "content": "You are simulating internal orchestration status updates."},
+                                {"role": "user", "content": prompt or "Generate a short simulation summary."},
+                            ],
+                            run_id=str(self._state["task_id"]),
+                            agent_id="sim-lead-agent",
+                            task_type="simulation",
+                            budget_context={"mode": "demo-fallback"},
+                        )
+                        model_summary = str(generated.get("content") or "No content returned by model adapter.")
+                        provider_used = str(generated.get("provider") or "router-fallback")
+                else:
+                    if not os.getenv("GROQ_API_KEY") and require_groq:
                         self._state["error"] = "GROQ_API_KEY is required for this run but is not configured"
                         self._state["status"] = "failed"
                         self._persist()
                         raise ValueError(str(self._state["error"]))
-                    model_summary = "GROQ_API_KEY not set; using deterministic fallback summary."
-                    provider_used = "fallback"
-                else:
                     generated = generate_response(
                         messages=[
                             {"role": "system", "content": "You are simulating internal orchestration status updates."},
                             {"role": "user", "content": prompt or "Generate a short simulation summary."},
                         ],
-                        run_id=self._state["task_id"],
+                        run_id=str(self._state["task_id"]),
                         agent_id="sim-lead-agent",
                         task_type="simulation",
                         budget_context={"mode": "demo"},
@@ -126,7 +199,7 @@ class SimulationStateStore:
                         "detail": model_summary,
                         "provider": provider_used,
                     },
-                    {"agent": "lead", "status": "completed", "detail": "Ready for approval."},
+                    {"agent": "lead", "status": "completed", "detail": "Ready for orchestration approval."},
                 ]
             }
             self._state["status"] = "awaiting_approval"
@@ -138,10 +211,7 @@ class SimulationStateStore:
         with self._lock:
             if not self._state["task_id"]:
                 raise ValueError("No simulation task has been started")
-            self._state["approval"] = {
-                "status": "approved" if approved else "rejected",
-                "note": note,
-            }
+            self._state["approval"] = {"status": "approved" if approved else "rejected", "note": note}
             self._state["status"] = "approved" if approved else "rejected"
             self._persist()
             return self.snapshot()
@@ -168,12 +238,37 @@ class SimulationStateStore:
             self._persist()
             return self.snapshot()
 
-    def auto_process(self, *, use_groq: bool, require_groq: bool, approval_note: str) -> dict[str, Any]:
-        """Run full whatsapp->agent->approval->drive->reply process automatically."""
+    def apply_orchestration_result(self, *, orchestration: ApiResponse) -> dict[str, Any]:
+        with self._lock:
+            body = orchestration.body
+            if orchestration.status_code >= 400:
+                self._state["status"] = "failed"
+                self._state["error"] = str(body.get("error") or "orchestration_failed")
+                self._persist()
+                return self.snapshot()
 
-        self.apply_agent_simulation(use_groq=use_groq, require_groq=require_groq)
-        self.apply_approval(approved=True, note=approval_note)
-        return self.publish_return()
+            deliverables = body.get("deliverables") or []
+            files = []
+            for item in deliverables:
+                share_url = str(item.get("share_url") or item.get("access_reference") or "")
+                title = str(item.get("title") or item.get("artifact_id") or "deliverable")
+                files.append({"name": title, "url": share_url})
+
+            self._state["approval"] = {"status": "approved", "note": "Auto-approved by real orchestration chain."}
+            self._state["drive"] = {
+                "root": "Simulated Drive",
+                "folders": ["returns", f"task-{self._state['task_id']}"],
+                "files": files,
+            }
+            completion_message = str(body.get("completion_message") or "Return complete.")
+            self._state["whatsapp"]["messages"].append(
+                {"direction": "outbound", "from": "assistant", "text": completion_message}
+            )
+            self._state["return_message"] = completion_message
+            self._state["status"] = "completed"
+            self._state["error"] = None
+            self._persist()
+            return self.snapshot()
 
 
 SIMULATION_UI_HTML = """
@@ -213,6 +308,7 @@ SIMULATION_UI_HTML = """
     <h3>2) Agent / Sub-agent Status</h3>
     <label><input type=\"checkbox\" id=\"useGroq\" checked /> Use Groq-backed generation</label>
     <label><input type=\"checkbox\" id=\"requireGroq\" checked /> Require GROQ_API_KEY (fail if missing)</label>
+    <label><input type=\"checkbox\" id=\"realGroq\" checked /> Use real Groq API call</label>
     <button onclick=\"runAgents()\">Run Agent Workflow</button>
     <pre id=\"agents\"></pre>
   </section>
@@ -255,33 +351,26 @@ function render(state) {
   sessionStorage.setItem('sim_state', JSON.stringify(state));
 }
 
+function payloadFromUi(autoProcessValue) {
+  return {
+    phone: document.getElementById('phone').value,
+    message: document.getElementById('prompt').value,
+    auto_process: autoProcessValue,
+    use_groq: document.getElementById('useGroq').checked,
+    require_groq: document.getElementById('requireGroq').checked,
+    use_real_groq_api: document.getElementById('realGroq').checked,
+    approval_note: document.getElementById('approvalNote').value,
+  };
+}
+
 async function refreshState() { render(await callApi('/simulator/api/state')); }
-async function startTask() {
-  const state = await callApi('/simulator/api/whatsapp-init', {
-    phone: document.getElementById('phone').value,
-    message: document.getElementById('prompt').value,
-    auto_process: document.getElementById('autoProcess').checked,
-    use_groq: document.getElementById('useGroq').checked,
-    require_groq: document.getElementById('requireGroq').checked,
-    approval_note: document.getElementById('approvalNote').value,
-  });
-  render(state);
-}
-async function startAndAutoRun() {
-  const state = await callApi('/simulator/api/whatsapp-init', {
-    phone: document.getElementById('phone').value,
-    message: document.getElementById('prompt').value,
-    auto_process: true,
-    use_groq: document.getElementById('useGroq').checked,
-    require_groq: document.getElementById('requireGroq').checked,
-    approval_note: document.getElementById('approvalNote').value,
-  });
-  render(state);
-}
+async function startTask() { render(await callApi('/simulator/api/whatsapp-init', payloadFromUi(document.getElementById('autoProcess').checked))); }
+async function startAndAutoRun() { render(await callApi('/simulator/api/whatsapp-init', payloadFromUi(true))); }
 async function runAgents() {
   render(await callApi('/simulator/api/agent-run', {
     use_groq: document.getElementById('useGroq').checked,
     require_groq: document.getElementById('requireGroq').checked,
+    use_real_groq_api: document.getElementById('realGroq').checked,
   }));
 }
 async function approveTask(approved) {

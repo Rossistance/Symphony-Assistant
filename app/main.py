@@ -116,11 +116,23 @@ def create_app(*, runtime: RuntimeContainer | None = None) -> Flask:
         )
         if bool(payload.get("auto_process")):
             try:
-                state = container.simulation_store.auto_process(
+                state = container.simulation_store.apply_agent_simulation(
                     use_groq=bool(payload.get("use_groq", True)),
                     require_groq=bool(payload.get("require_groq", True)),
-                    approval_note=str(payload.get("approval_note") or "Auto-approved by simulator workflow."),
+                    use_real_groq_api=bool(payload.get("use_real_groq_api", True)),
                 )
+                orchestration_response = container.http_handlers.post_jobs_orchestrate(
+                    {
+                        "task_id": str(state.get("task_id") or ""),
+                        "prompt": str(state.get("prompt") or ""),
+                        "deliverable": str(state.get("agent", {}).get("events", [{}])[-2].get("detail") or ""),
+                        "subtasks": [
+                            {"task_id": "sim-worker-1", "objective": "Compile response artifacts", "dependencies": []},
+                            {"task_id": "sim-worker-2", "objective": "Validate response payload", "dependencies": ["sim-worker-1"]},
+                        ],
+                    }
+                )
+                state = container.simulation_store.apply_orchestration_result(orchestration=orchestration_response)
             except ValueError:
                 state = container.simulation_store.snapshot()
         return jsonify(state)
@@ -132,6 +144,7 @@ def create_app(*, runtime: RuntimeContainer | None = None) -> Flask:
             state = container.simulation_store.apply_agent_simulation(
                 use_groq=bool(payload.get("use_groq", True)),
                 require_groq=bool(payload.get("require_groq", False)),
+                use_real_groq_api=bool(payload.get("use_real_groq_api", True)),
             )
         except ValueError:
             return jsonify(container.simulation_store.snapshot()), 400
@@ -142,11 +155,23 @@ def create_app(*, runtime: RuntimeContainer | None = None) -> Flask:
     def post_simulator_auto_run():
         payload = request.get_json(silent=True) or {}
         try:
-            state = container.simulation_store.auto_process(
+            state = container.simulation_store.apply_agent_simulation(
                 use_groq=bool(payload.get("use_groq", True)),
                 require_groq=bool(payload.get("require_groq", True)),
-                approval_note=str(payload.get("approval_note") or "Auto-approved by simulator workflow."),
+                use_real_groq_api=bool(payload.get("use_real_groq_api", True)),
             )
+            orchestration_response = container.http_handlers.post_jobs_orchestrate(
+                {
+                    "task_id": str(state.get("task_id") or ""),
+                    "prompt": str(state.get("prompt") or ""),
+                    "deliverable": str(state.get("agent", {}).get("events", [{}])[-2].get("detail") or ""),
+                    "subtasks": [
+                        {"task_id": "sim-worker-1", "objective": "Compile response artifacts", "dependencies": []},
+                        {"task_id": "sim-worker-2", "objective": "Validate response payload", "dependencies": ["sim-worker-1"]},
+                    ],
+                }
+            )
+            state = container.simulation_store.apply_orchestration_result(orchestration=orchestration_response)
         except ValueError:
             return jsonify(container.simulation_store.snapshot()), 400
         return jsonify(state)

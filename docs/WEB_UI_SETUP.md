@@ -222,7 +222,8 @@ Notes:
 
 - Simulator state is mirrored to a temp JSON file and also cached in browser `sessionStorage`.
 - Browser close/reset calls clear simulator state.
-- The simulator now supports automatic end-to-end flow from WhatsApp initiation through agent, approval, drive publish, and WhatsApp return via the `Auto-run full workflow` control.
+- The simulator now supports automatic end-to-end flow from WhatsApp initiation through agent, orchestration, approval, drive publish, and WhatsApp return via the `Auto-run full workflow` control.
+- When `Use real Groq API call` is enabled, the agent stage calls the live Groq Chat Completions endpoint using `GROQ_API_KEY` before continuing through orchestration.
 - The agent pane can be configured to require `GROQ_API_KEY` and fail fast if missing, so you can verify a real key-backed model step in the chain.
 
 
