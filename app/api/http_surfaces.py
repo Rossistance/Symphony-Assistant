@@ -74,17 +74,7 @@ class HttpSurfaceHandlers:
         self.events: list[dict[str, Any]] = []
         self._ids = count(1)
         if self.deliverable_publisher is None:
-            self.deliverable_publisher = create_deliverable_publisher(
-                backend=self.deliverables_config.backend,
-                drive_root=self.deliverables_config.in_memory_drive_root,
-                google_drive_folder_id=self.deliverables_config.google_drive_folder_id,
-                environment=self.deliverables_config.google_drive_environment,
-                allow_google_drive_parent_override=self.deliverables_config.google_drive_allow_parent_override,
-                allowed_google_drive_parent_ids=self.deliverables_config.google_drive_allowed_parent_ids,
-                google_drive_share_visibility=self.deliverables_config.google_drive_share_visibility,
-                google_drive_share_expiry_hours=self.deliverables_config.google_drive_share_expiry_hours,
-                google_drive_supports_permission_expiry=self.deliverables_config.google_drive_supports_permission_expiry,
-            )
+            self.deliverable_publisher = create_deliverable_publisher(config=self.deliverables_config)
         if self.inbound_pipeline is None:
             self.inbound_pipeline = InboundIngestionPipeline(
                 dedupe_store=get_runtime_state_store(),
@@ -107,8 +97,9 @@ class HttpSurfaceHandlers:
         error_type: str,
         error_message: str,
         status_code: int = 500,
+        final_status: str = "failed",
     ) -> ApiResponse:
-        status = "failed"
+        status = final_status
         self._emit(
             "deliverable.publish.failed",
             {
@@ -279,6 +270,7 @@ class HttpSurfaceHandlers:
                 error="deliverable_publish_config_error",
                 error_type="config",
                 error_message=str(exc),
+                final_status="partial",
             )
         except DeliverablePublisherCredentialError as exc:
             return self._publish_failure_response(
@@ -303,6 +295,7 @@ class HttpSurfaceHandlers:
                 error="deliverable_publish_failed",
                 error_type="publish",
                 error_message=str(exc),
+                final_status="partial",
             )
         except Exception as exc:
             return self._publish_failure_response(
@@ -315,6 +308,7 @@ class HttpSurfaceHandlers:
                 error="deliverable_publish_unexpected_error",
                 error_type="unexpected",
                 error_message=str(exc),
+                final_status="partial",
             )
         for deliverable_item in published:
             self._emit(
@@ -327,6 +321,12 @@ class HttpSurfaceHandlers:
                     "share_url": deliverable_item.share_url,
                     "parent_folder_id": deliverable_item.parent_folder_id,
                     "access_mode": deliverable_item.access_mode,
+                    "share_visibility": deliverable_item.share_visibility,
+                    "permission_role": deliverable_item.permission_role,
+                    "permission_type": deliverable_item.permission_type,
+                    "access_reference": deliverable_item.access_reference,
+                    "expiry_requested_hours": deliverable_item.expiry_requested_hours,
+                    "expiry_applied": deliverable_item.expiry_applied,
                 },
             )
 
@@ -354,6 +354,12 @@ class HttpSurfaceHandlers:
                     "share_url": item.share_url,
                     "parent_folder_id": item.parent_folder_id,
                     "access_mode": item.access_mode,
+                    "share_visibility": item.share_visibility,
+                    "permission_role": item.permission_role,
+                    "permission_type": item.permission_type,
+                    "access_reference": item.access_reference,
+                    "expiry_requested_hours": item.expiry_requested_hours,
+                    "expiry_applied": item.expiry_applied,
                 }
                 for item in published
             ],

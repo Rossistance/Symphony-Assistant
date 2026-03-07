@@ -9,8 +9,10 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.parse import quote
+
+from app.config import DeliverablesConfig, DeliverablesStorageConfig
 
 
 @dataclass(frozen=True)
@@ -105,7 +107,11 @@ class DriveFolderResolution:
 
 @dataclass(frozen=True)
 class DriveFolderPolicy:
-    """Folder policy for deterministic, bounded Google Drive task locations."""
+    """Folder policy for deterministic, bounded Google Drive task locations.
+
+    Policy note: environment/task segmentation is deterministic and rooted to a
+    bounded root folder to keep future backend swaps low-risk.
+    """
 
     root_folder_id: str
     environment: str
@@ -121,7 +127,6 @@ class DriveFolderPolicy:
             raise DeliverablePublisherConfigError("GOOGLE_DRIVE_FOLDER_ID is required when deliverables backend is google_drive")
         if not _DRIVE_ID_PATTERN.fullmatch(root):
             raise DeliverablePublisherConfigError("GOOGLE_DRIVE_FOLDER_ID must be a bounded Drive-safe token")
-
         if not self._sanitize_segment(self.environment_segment):
             raise DeliverablePublisherConfigError("Drive folder policy environment segment is invalid")
         if not self._sanitize_segment(self.tasks_segment):
@@ -129,54 +134,55 @@ class DriveFolderPolicy:
         if not self._sanitize_segment(self.environment):
             raise DeliverablePublisherConfigError("Drive folder policy environment is invalid")
 
-        allowed = {item.strip() for item in self.allowed_override_parent_ids if item.strip()}
-        if self.allow_parent_override and not allowed:
-            raise DeliverablePublisherConfigError(
-                "Drive parent override requires explicit allowed parent IDs when enabled"
-            )
-        for parent_id in allowed:
-            if not _DRIVE_ID_PATTERN.fullmatch(parent_id):
-                raise DeliverablePublisherConfigError("Drive override parent IDs must be bounded Drive-safe tokens")
-
     def resolve(self, *, task_id: str, parent_folder_id: str | None = None) -> DriveFolderResolution:
-        """Resolve deterministic env/task folders under the policy root."""
-
         self.validate()
         resolved_root = self._resolve_root(parent_folder_id=parent_folder_id)
-
         env_segment = self._sanitize_segment(self.environment)
         task_segment = self._sanitize_segment(task_id)
         env_folder_id = hashlib.sha256(f"{resolved_root}:{self.environment_segment}:{env_segment}".encode("utf-8")).hexdigest()[:24]
-        task_folder_id = hashlib.sha256(
-            f"{env_folder_id}:{self.tasks_segment}:{task_segment}".encode("utf-8")
-        ).hexdigest()[:24]
-        path = f"{self.environment_segment}/{env_segment}/{self.tasks_segment}/{task_segment}"
-
+        task_folder_id = hashlib.sha256(f"{env_folder_id}:{self.tasks_segment}:{task_segment}".encode("utf-8")).hexdigest()[:24]
         return DriveFolderResolution(
             root_folder_id=resolved_root,
             environment_folder_id=env_folder_id,
             task_folder_id=task_folder_id,
-            folder_path=path,
+            folder_path=f"{self.environment_segment}/{env_segment}/{self.tasks_segment}/{task_segment}",
         )
 
     def _resolve_root(self, *, parent_folder_id: str | None) -> str:
-        if parent_folder_id is None:
+        if parent_folder_id is None or not parent_folder_id.strip():
             return self.root_folder_id.strip()
-
         candidate = parent_folder_id.strip()
-        if not candidate:
-            return self.root_folder_id.strip()
-
         if not self.allow_parent_override:
             raise DeliverablePublisherConfigError("Drive parent folder override is not allowed by policy")
-        if candidate not in {item.strip() for item in self.allowed_override_parent_ids if item.strip()}:
+        allowed = {item.strip() for item in self.allowed_override_parent_ids if item.strip()}
+        if candidate not in allowed:
             raise DeliverablePublisherConfigError("Drive parent folder override is not in allowed policy set")
         return candidate
 
     def _sanitize_segment(self, raw: str) -> str:
         normalized = _SAFE_SEGMENT_PATTERN.sub("-", raw.strip().lower()).strip("-_")
-        bounded = normalized[: self.max_segment_length]
-        return bounded or "unknown"
+        return (normalized[: self.max_segment_length]) or "unknown"
+
+
+class DriveClient(Protocol):
+    """Minimal Drive API contract used by the publisher implementation."""
+
+    def ensure_folder(self, *, parent_id: str, name: str) -> str: ...
+
+    def upload_file(self, *, parent_id: str, title: str, mime_type: str, source_ref: str) -> str: ...
+
+
+@dataclass
+class DeterministicDriveClient:
+    """Deterministic in-process Drive client used by tests and local development."""
+
+    def ensure_folder(self, *, parent_id: str, name: str) -> str:
+        return hashlib.sha256(f"folder:{parent_id}:{name}".encode("utf-8")).hexdigest()[:24]
+
+    def upload_file(self, *, parent_id: str, title: str, mime_type: str, source_ref: str) -> str:
+        safe_name = Path(source_ref).name or title
+        seed = f"file:{parent_id}:{title}:{mime_type}:{safe_name}".encode("utf-8")
+        return hashlib.sha256(seed).hexdigest()[:33]
 
 
 @dataclass
@@ -193,71 +199,58 @@ class InMemoryDeliverablePublisher:
             seed = f"{task_id}:{artifact.artifact_id}:{safe_name}:{artifact.mime_type}".encode("utf-8")
             token = hashlib.sha256(seed).hexdigest()[:12]
             drive_file_id = f"drv-{task_id}-{artifact.artifact_id}-{token}"
-            published_artifact = PublishedDeliverable(
-                artifact_id=artifact.artifact_id,
-                title=artifact.title,
-                mime_type=artifact.mime_type,
-                drive_file_id=drive_file_id,
-                share_url=f"{self.drive_root}/{drive_file_id}/{quote(safe_name)}",
-                access_reference=f"{self.drive_root}/{drive_file_id}/{quote(safe_name)}",
-                share_visibility="view_only",
-                permission_role="reader",
-                permission_type="anyone",
-                access_mode="view_only",
+            url = f"{self.drive_root}/{drive_file_id}/{quote(safe_name)}"
+            published.append(
+                PublishedDeliverable(
+                    artifact_id=artifact.artifact_id,
+                    title=artifact.title,
+                    mime_type=artifact.mime_type,
+                    drive_file_id=drive_file_id,
+                    share_url=url,
+                    access_reference=url,
+                    share_visibility="view_only",
+                    permission_role="reader",
+                    permission_type="anyone",
+                    access_mode="view_only",
+                )
             )
-            published.append(published_artifact)
-
         self._records[task_id] = list(published)
         return published
 
 
-@dataclass(frozen=True)
+@dataclass
 class GoogleDriveDeliverablePublisher:
-    """Google Drive publisher that validates credentials and returns stable metadata."""
+    """Drive-backed publisher with deterministic folder policy and share policy mapping."""
 
-    folder_id: str
+    storage: DeliverablesStorageConfig
+    drive_client: DriveClient = field(default_factory=DeterministicDriveClient)
     share_base_url: str = "https://drive.google.com/file/d"
-    credentials_json: str | None = None
-    folder_policy: DriveFolderPolicy | None = None
-    share_policy: DriveSharePolicy = field(default_factory=DriveSharePolicy)
     unsupported_expiry_events: list[str] = field(default_factory=list)
 
     def publish(self, *, task_id: str, artifacts: list[DeliverableArtifact]) -> list[PublishedDeliverable]:
-        policy = self.folder_policy or DriveFolderPolicy(
-            root_folder_id=self.folder_id,
-            environment=os.getenv("APP_ENV", "dev"),
+        credentials_payload = self._load_credentials()
+        _ = credentials_payload.get("client_email")
+        folder_policy = DriveFolderPolicy(
+            root_folder_id=self.storage.root_folder_id,
+            environment=self.storage.environment,
+            environment_segment=self.storage.environment_segment,
+            tasks_segment=self.storage.tasks_segment,
+            allow_parent_override=self.storage.allow_parent_override,
+            allowed_override_parent_ids=self.storage.allowed_parent_ids,
         )
-        resolved_folder = policy.resolve(task_id=task_id)
-        self.share_policy.validate()
+        resolved = folder_policy.resolve(task_id=task_id)
 
-        raw_credentials = self.credentials_json or os.getenv("GOOGLE_DRIVE_CREDENTIALS_JSON", "")
-        if not raw_credentials.strip():
-            raise DeliverablePublisherCredentialError(
-                "GOOGLE_DRIVE_CREDENTIALS_JSON is required when deliverables backend is google_drive"
-            )
-
-        try:
-            credentials_payload = json.loads(raw_credentials)
-        except json.JSONDecodeError as exc:
-            raise DeliverablePublisherCredentialError(
-                "GOOGLE_DRIVE_CREDENTIALS_JSON must be valid JSON"
-            ) from exc
-
-        if not isinstance(credentials_payload, dict) or not credentials_payload.get("client_email"):
-            raise DeliverablePublisherCredentialError(
-                "GOOGLE_DRIVE_CREDENTIALS_JSON must include client_email"
-            )
+        env_folder_id = self.drive_client.ensure_folder(parent_id=resolved.root_folder_id, name=resolved.folder_path.split("/")[1])
+        task_folder_id = self.drive_client.ensure_folder(parent_id=env_folder_id, name=resolved.folder_path.split("/")[-1])
 
         published: list[PublishedDeliverable] = []
         for artifact in artifacts:
-            safe_name = Path(artifact.source_ref).name or artifact.artifact_id
-            stable_input = (
-                f"{resolved_folder.task_folder_id}:{resolved_folder.folder_path}:{task_id}:"
-                f"{artifact.artifact_id}:{artifact.mime_type}:{safe_name}"
-            ).encode(
-                "utf-8"
+            drive_file_id = self.drive_client.upload_file(
+                parent_id=task_folder_id,
+                title=artifact.title,
+                mime_type=artifact.mime_type,
+                source_ref=artifact.source_ref,
             )
-            drive_file_id = hashlib.sha256(stable_input).hexdigest()[:33]
             permission = self._apply_share_policy(drive_file_id=drive_file_id)
             published.append(
                 PublishedDeliverable(
@@ -265,96 +258,75 @@ class GoogleDriveDeliverablePublisher:
                     title=artifact.title,
                     mime_type=artifact.mime_type,
                     drive_file_id=drive_file_id,
+                    parent_folder_id=task_folder_id,
                     share_url=permission.share_url,
                     access_reference=permission.access_reference,
                     share_visibility=permission.visibility,
                     permission_role=permission.permission_role,
                     permission_type=permission.permission_type,
-                    parent_folder_id=resolved_folder.root_folder_id,
                     access_mode=permission.visibility,
                     expiry_requested_hours=permission.expiry_requested_hours,
                     expiry_applied=permission.expiry_applied,
                 )
             )
-
         return published
 
+    def _load_credentials(self) -> dict[str, Any]:
+        try:
+            self.storage.validate()
+            raw = self.storage.resolve_credentials_json()
+        except ValueError as exc:
+            raise DeliverablePublisherCredentialError(str(exc)) from exc
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise DeliverablePublisherCredentialError("Google Drive credentials payload must be valid JSON") from exc
+        if not isinstance(payload, dict) or not payload.get("client_email"):
+            raise DeliverablePublisherCredentialError("Google Drive credentials JSON must include client_email")
+        return payload
+
     def _apply_share_policy(self, *, drive_file_id: str) -> DrivePermissionApplication:
-        visibility = self.share_policy.visibility
-        expiry_requested = self.share_policy.expiry_hours
-        expiry_applied = expiry_requested is not None and self.share_policy.supports_permission_expiry
-
-        if expiry_requested is not None and not self.share_policy.supports_permission_expiry:
-            self.unsupported_expiry_events.append(
-                f"drive_file_id={drive_file_id}: permission expiry unsupported; expiry request ignored"
-            )
-
-        if visibility == "view_only":
-            permission_role = "reader"
-            permission_type = "anyone"
+        policy = DriveSharePolicy(
+            visibility=self.storage.share_visibility,
+            expiry_hours=self.storage.share_expiry_hours,
+            supports_permission_expiry=self.storage.supports_permission_expiry,
+        )
+        policy.validate()
+        expiry_applied = bool(policy.expiry_hours and policy.supports_permission_expiry)
+        if policy.expiry_hours and not policy.supports_permission_expiry:
+            self.unsupported_expiry_events.append(f"drive_file_id={drive_file_id}: permission expiry unsupported")
+        if policy.visibility == "view_only":
             share_url = f"{self.share_base_url}/{drive_file_id}/view"
-            access_reference = share_url
+            permission_type = "anyone"
         else:
-            permission_role = "reader"
-            permission_type = "restricted"
             share_url = f"drive://file/{drive_file_id}"
-            access_reference = share_url
-
+            permission_type = "restricted"
         if expiry_applied:
-            _ = (datetime.now(UTC) + timedelta(hours=expiry_requested)).isoformat()
-
+            _ = (datetime.now(UTC) + timedelta(hours=policy.expiry_hours or 0)).isoformat()
         return DrivePermissionApplication(
-            visibility=visibility,
-            permission_role=permission_role,
+            visibility=policy.visibility,
+            permission_role="reader",
             permission_type=permission_type,
             share_url=share_url,
-            access_reference=access_reference,
-            expiry_requested_hours=expiry_requested,
+            access_reference=share_url,
+            expiry_requested_hours=policy.expiry_hours,
             expiry_applied=expiry_applied,
         )
 
 
-def create_deliverable_publisher(
-    *,
-    backend: str,
-    drive_root: str,
-    google_drive_folder_id: str,
-    environment: str = "dev",
-    allow_google_drive_parent_override: bool = False,
-    allowed_google_drive_parent_ids: tuple[str, ...] = (),
-    google_drive_share_visibility: str = "private",
-    google_drive_share_expiry_hours: int | None = None,
-    google_drive_supports_permission_expiry: bool = False,
-) -> DeliverablePublisher:
-    """Create a deliverable publisher from the configured backend."""
+def create_deliverable_publisher(*, config: DeliverablesConfig) -> DeliverablePublisher:
+    """Create a deliverable publisher from the unified config object."""
 
-    normalized_backend = backend.strip().lower()
-    if normalized_backend == "in_memory":
-        return InMemoryDeliverablePublisher(drive_root=drive_root)
-    if normalized_backend == "google_drive":
-        return GoogleDriveDeliverablePublisher(
-            folder_id=google_drive_folder_id,
-            folder_policy=DriveFolderPolicy(
-                root_folder_id=google_drive_folder_id,
-                environment=environment,
-                allow_parent_override=allow_google_drive_parent_override,
-                allowed_override_parent_ids=allowed_google_drive_parent_ids,
-            ),
-            share_policy=DriveSharePolicy(
-                visibility=google_drive_share_visibility,
-                expiry_hours=google_drive_share_expiry_hours,
-                supports_permission_expiry=google_drive_supports_permission_expiry,
-            ),
-        )
-
+    if config.backend == "in_memory":
+        return InMemoryDeliverablePublisher(drive_root=config.in_memory_drive_root)
+    if config.backend == "google_drive":
+        return GoogleDriveDeliverablePublisher(storage=config.storage)
     raise DeliverablePublisherConfigError(
-        f"Unsupported deliverables backend '{backend}'. Expected one of: in_memory, google_drive"
+        f"Unsupported deliverables backend '{config.backend}'. Expected one of: in_memory, google_drive"
     )
 
 
 def compose_completion_message(*, task_title: str, deliverables: list[PublishedDeliverable]) -> str:
-    """Builds a channel-safe completion message that includes deliverable links."""
-
     lines = [f"Done — I completed {task_title}."]
     if deliverables:
         lines.append("Deliverables:")

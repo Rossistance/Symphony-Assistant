@@ -94,6 +94,8 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         self.assertTrue(response.body["deliverables"][0]["share_url"].startswith("https://drive.example/files/"))
         self.assertIsNone(response.body["deliverables"][0]["parent_folder_id"])
         self.assertEqual(response.body["deliverables"][0]["access_mode"], "view_only")
+        self.assertEqual(response.body["deliverables"][0]["permission_role"], "reader")
+        self.assertEqual(response.body["deliverables"][0]["permission_type"], "anyone")
         self.assertIn("Done — I completed draft release summary.", response.body["completion_message"])
 
         lookup = self.handlers.get_api_v1_tasks_id("task-deliverable")
@@ -153,7 +155,7 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         response = handlers.post_jobs_orchestrate({"task_id": "task-publish-fail", "prompt": "draft plan"})
 
         self.assertEqual(response.status_code, 500)
-        self.assertEqual(response.body["status"], "failed")
+        self.assertEqual(response.body["status"], "partial")
         self.assertEqual(response.body["error"], "deliverable_publish_failed")
         self.assertEqual(response.body["failure_reason_code"], "deliverable_publish_failed")
         self.assertIn("couldn't publish", response.body["completion_message"].lower())
@@ -168,7 +170,7 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         self.assertEqual(failed_event["payload"]["correlation_id"], "task-publish-fail")
 
         status_event = next(event for event in handlers.events if event["event_type"] == "task.status.updated")
-        self.assertEqual(status_event["payload"]["status"], "failed")
+        self.assertEqual(status_event["payload"]["status"], "partial")
         self.assertEqual(status_event["payload"]["correlation_id"], "task-publish-fail")
 
 

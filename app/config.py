@@ -49,7 +49,12 @@ class ModelRouterConfig:
 
 @dataclass(frozen=True)
 class DeliverablesStorageConfig:
-    """Storage-specific settings for deliverable publication backends."""
+    """Storage settings for deliverable publication backends.
+
+    Policy note: this structure intentionally centralizes backend selection,
+    credentials, folder layout controls, and sharing defaults so storage layout
+    replacement can happen behind a single config contract.
+    """
 
     backend: str = os.getenv("DELIVERABLES_BACKEND", "in_memory").strip().lower()
     credentials_json: str = os.getenv("GOOGLE_DRIVE_CREDENTIALS_JSON", "")
@@ -57,6 +62,19 @@ class DeliverablesStorageConfig:
     delegated_subject: str | None = (os.getenv("GOOGLE_DRIVE_DELEGATED_SUBJECT", "").strip() or None)
     use_shared_drive: bool = _as_bool("GOOGLE_DRIVE_USE_SHARED_DRIVE", False)
     drive_id: str | None = (os.getenv("GOOGLE_DRIVE_DRIVE_ID", "").strip() or None)
+    root_folder_id: str = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "")
+    environment: str = os.getenv("DELIVERABLES_ENVIRONMENT", os.getenv("APP_ENV", "dev"))
+    environment_segment: str = os.getenv("GOOGLE_DRIVE_ENVIRONMENT_SEGMENT", "env")
+    tasks_segment: str = os.getenv("GOOGLE_DRIVE_TASKS_SEGMENT", "tasks")
+    allow_parent_override: bool = _as_bool("GOOGLE_DRIVE_ALLOW_PARENT_OVERRIDE", False)
+    allowed_parent_ids: tuple[str, ...] = field(default_factory=lambda: _csv_tuple("GOOGLE_DRIVE_ALLOWED_PARENT_IDS", ""))
+    share_visibility: str = os.getenv("GOOGLE_DRIVE_SHARE_VISIBILITY", "private").strip().lower()
+    share_expiry_hours: int | None = (
+        int(os.getenv("GOOGLE_DRIVE_SHARE_EXPIRY_HOURS", "").strip())
+        if os.getenv("GOOGLE_DRIVE_SHARE_EXPIRY_HOURS", "").strip()
+        else None
+    )
+    supports_permission_expiry: bool = _as_bool("GOOGLE_DRIVE_SUPPORTS_PERMISSION_EXPIRY", False)
 
     @classmethod
     def from_env(cls, *, backend: str | None = None) -> "DeliverablesStorageConfig":
@@ -67,6 +85,19 @@ class DeliverablesStorageConfig:
             delegated_subject=(os.getenv("GOOGLE_DRIVE_DELEGATED_SUBJECT", "").strip() or None),
             use_shared_drive=_as_bool("GOOGLE_DRIVE_USE_SHARED_DRIVE", False),
             drive_id=(os.getenv("GOOGLE_DRIVE_DRIVE_ID", "").strip() or None),
+            root_folder_id=os.getenv("GOOGLE_DRIVE_FOLDER_ID", ""),
+            environment=os.getenv("DELIVERABLES_ENVIRONMENT", os.getenv("APP_ENV", "dev")),
+            environment_segment=os.getenv("GOOGLE_DRIVE_ENVIRONMENT_SEGMENT", "env"),
+            tasks_segment=os.getenv("GOOGLE_DRIVE_TASKS_SEGMENT", "tasks"),
+            allow_parent_override=_as_bool("GOOGLE_DRIVE_ALLOW_PARENT_OVERRIDE", False),
+            allowed_parent_ids=_csv_tuple("GOOGLE_DRIVE_ALLOWED_PARENT_IDS", ""),
+            share_visibility=os.getenv("GOOGLE_DRIVE_SHARE_VISIBILITY", "private").strip().lower(),
+            share_expiry_hours=(
+                int(os.getenv("GOOGLE_DRIVE_SHARE_EXPIRY_HOURS", "").strip())
+                if os.getenv("GOOGLE_DRIVE_SHARE_EXPIRY_HOURS", "").strip()
+                else None
+            ),
+            supports_permission_expiry=_as_bool("GOOGLE_DRIVE_SUPPORTS_PERMISSION_EXPIRY", False),
         )
 
     @property
@@ -102,6 +133,10 @@ class DeliverablesStorageConfig:
 
         if self.use_shared_drive and not self.drive_id:
             raise ValueError("GOOGLE_DRIVE_DRIVE_ID is required when GOOGLE_DRIVE_USE_SHARED_DRIVE is enabled")
+        if self.share_visibility not in {"private", "view_only"}:
+            raise ValueError("GOOGLE_DRIVE_SHARE_VISIBILITY must be one of: private, view_only")
+        if self.share_expiry_hours is not None and self.share_expiry_hours <= 0:
+            raise ValueError("GOOGLE_DRIVE_SHARE_EXPIRY_HOURS must be a positive integer when set")
 
     def resolve_credentials_json(self) -> str:
         """Return normalized credentials JSON according to source precedence."""
@@ -167,6 +202,13 @@ class DeliverablesConfig:
             google_drive_supports_permission_expiry=_as_bool("GOOGLE_DRIVE_SUPPORTS_PERMISSION_EXPIRY", False),
             storage=DeliverablesStorageConfig.from_env(backend=os.getenv("DELIVERABLES_BACKEND", "in_memory")),
         )
+        object.__setattr__(config, "google_drive_folder_id", config.storage.root_folder_id)
+        object.__setattr__(config, "google_drive_environment", config.storage.environment)
+        object.__setattr__(config, "google_drive_allow_parent_override", config.storage.allow_parent_override)
+        object.__setattr__(config, "google_drive_allowed_parent_ids", config.storage.allowed_parent_ids)
+        object.__setattr__(config, "google_drive_share_visibility", config.storage.share_visibility)
+        object.__setattr__(config, "google_drive_share_expiry_hours", config.storage.share_expiry_hours)
+        object.__setattr__(config, "google_drive_supports_permission_expiry", config.storage.supports_permission_expiry)
         config._validate_share_policy()
         config.storage.validate()
         return config
