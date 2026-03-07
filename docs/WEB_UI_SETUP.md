@@ -196,3 +196,62 @@ If you want a practical progression with minimal risk:
 3. **Next:** add observability panels and artifact link previews.
 
 This gives immediate usability without blocking on full product UI design.
+
+
+## 6) New local workflow simulator UI (5 interactive windows)
+
+A lightweight browser-based simulator is now available for local testing of the intended flow:
+
+- WhatsApp initiation
+- Agent/sub-agent task execution updates
+- Approval decision
+- Simulated Drive folder/file placement
+- WhatsApp return reply
+
+Run the Flask app:
+
+```bash
+python -m app.main
+```
+
+Open:
+
+- `http://localhost:8000/simulator`
+
+Notes:
+
+- Simulator state is mirrored to a temp JSON file and also cached in browser `sessionStorage`.
+- Browser close/reset calls clear simulator state.
+- Only the agent workflow pane can invoke the model router (Groq-first when `GROQ_API_KEY` is set); other panes are deterministic simulations.
+
+
+## 7) One-shot install + run command (recommended)
+
+From repo root, run:
+
+```bash
+bash scripts/run_local_simulator.sh
+```
+
+What this does:
+
+1. Creates `.venv` (if missing)
+2. Installs/updates `pip`
+3. Installs `flask` and `pytest`
+4. Starts the app and serves simulator UI at `http://localhost:8000/simulator`
+
+Optional with Groq + custom port:
+
+```bash
+GROQ_API_KEY="your_real_groq_key" PORT=8000 bash scripts/run_local_simulator.sh
+```
+
+If you prefer manual commands instead of the script:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install flask pytest
+python -m app.main
+```
