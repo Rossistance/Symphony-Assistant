@@ -1,4 +1,12 @@
-"""Approval API handlers."""
+"""Approval API handlers.
+
+Route integration notes:
+- `post_approval_decision` expects authentication/authorization to be performed by
+  upstream HTTP middleware.
+- Middleware must provide an `AuthenticatedActorContext` instance separately from
+  the JSON payload; user-controlled payload data is never trusted for auth.
+- The payload `actor` must match the trusted context subject.
+"""
 
 from __future__ import annotations
 
@@ -26,6 +34,8 @@ _DECISION_TO_STATUS = {
     ApprovalDecision.REJECTED: ApprovalStatus.REJECTED,
 }
 
+APPROVAL_DECISION_PERMISSION = "approvals:decide"
+
 
 @dataclass(frozen=True)
 class ApiResponse:
@@ -35,22 +45,28 @@ class ApiResponse:
     body: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class AuthenticatedActorContext:
+    """Trusted authentication context built by HTTP middleware."""
+
+    subject: str
+    authenticated: bool
+    permissions: frozenset[str] = frozenset()
+
+
 def is_valid_approval_transition(*, from_status: ApprovalStatus, to_status: ApprovalStatus) -> bool:
     """Returns whether the requested approval status transition is allowed."""
 
     return to_status in APPROVAL_TRANSITION_GRAPH.get(from_status, frozenset())
 
 
-def _authorize_mutation(payload: dict[str, Any], actor: str) -> ApiResponse | None:
-    auth = payload.get("auth")
-    if not isinstance(auth, dict):
+def _authorize_mutation(context: AuthenticatedActorContext, actor: str) -> ApiResponse | None:
+    if not context.authenticated:
         return ApiResponse(status_code=401, body={"error": "authentication required"})
-    if not bool(auth.get("authenticated")):
-        return ApiResponse(status_code=401, body={"error": "authentication required"})
-    if not bool(auth.get("can_decide_approvals")):
+    if APPROVAL_DECISION_PERMISSION not in context.permissions:
         return ApiResponse(status_code=403, body={"error": "missing approval decision permission"})
 
-    subject = str(auth.get("subject", "")).strip()
+    subject = context.subject.strip()
     if subject and subject != actor:
         return ApiResponse(status_code=403, body={"error": "actor does not match authenticated subject"})
     return None
@@ -60,6 +76,7 @@ def post_approval_decision(
     *,
     approval_id: str,
     payload: dict[str, Any],
+    authenticated_actor: AuthenticatedActorContext,
     policy_engine: ActionPolicyEngine,
 ) -> ApiResponse:
     """Handles POST /api/v1/approvals/:id/decision requests."""
@@ -69,7 +86,7 @@ def post_approval_decision(
     if not actor:
         return ApiResponse(status_code=400, body={"error": "actor is required"})
 
-    authz_error = _authorize_mutation(payload, actor)
+    authz_error = _authorize_mutation(authenticated_actor, actor)
     if authz_error is not None:
         return authz_error
 
@@ -115,7 +132,9 @@ def post_approval_decision(
 
 
 __all__ = [
+    "APPROVAL_DECISION_PERMISSION",
     "APPROVAL_TRANSITION_GRAPH",
+    "AuthenticatedActorContext",
     "ApiResponse",
     "DECISION_ROUTE",
     "is_valid_approval_transition",
