@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+import warnings
 
 from app.config import ModelRouterConfig
 from app.models.base import (
@@ -13,6 +14,7 @@ from app.models.base import (
 )
 from app.models.discovery import discover_providers
 from app.models.router import ModelRouter
+from app.services.model_routing import RoutedModelClient
 
 
 class StubProvider:
@@ -26,9 +28,10 @@ class StubProvider:
         if self.failures_remaining > 0:
             self.failures_remaining -= 1
             raise TransientProviderError(f"{self.name} transient")
-        return {"provider": self.name, "messages": request.messages, "trace": trace.run_id}
+        return {"provider": self.name, "content": request.messages[-1].get("content", ""), "trace": trace.run_id}
 
     def embed(self, texts: list[str], trace: TraceMetadata):
+        del trace
         if not self.capabilities.embeddings:
             raise ProviderError("no embeddings")
         return [[0.1] for _ in texts]
@@ -61,8 +64,9 @@ class TestModelRouterFailover(unittest.TestCase):
     def _trace(self) -> TraceMetadata:
         return TraceMetadata(run_id="run-1", agent_id="agent-a", task_type="chat", budget_context={"tokens": 500})
 
-    def test_uses_router_precedence(self):
+    def _registry(self, *, groq_failures: int = 0):
         groq = StubProvider("groq", ProviderCapabilities(chat=True, tool_calling=True, embeddings=False))
+        groq.failures_remaining = groq_failures
         openai = StubProvider("openai", ProviderCapabilities(chat=True, tool_calling=True, embeddings=True))
         registry = type(
             "Registry",
@@ -75,52 +79,59 @@ class TestModelRouterFailover(unittest.TestCase):
                 },
             },
         )()
+        return registry, groq, openai
 
+    def test_uses_router_precedence(self):
+        registry, _, _ = self._registry()
         router = ModelRouter(settings=ModelRouterConfig(router_order=("groq", "openai"), max_retries=1), registry=registry, sleeper=lambda _: None)
+
         result = router.generate(GenerateRequest(messages=[{"role": "user", "content": "hi"}]), self._trace())
 
         self.assertEqual(result["provider"], "groq")
 
-    def test_fails_over_after_transient_retries(self):
-        groq = StubProvider("groq", ProviderCapabilities(chat=True, tool_calling=True, embeddings=False))
-        groq.failures_remaining = 3
-        openai = StubProvider("openai", ProviderCapabilities(chat=True, tool_calling=True, embeddings=True))
-        registry = type(
-            "Registry",
-            (),
-            {
-                "providers": {"groq": groq, "openai": openai},
-                "capability_matrix": {
-                    "groq": {"chat": True, "tool_calling": True, "embeddings": False},
-                    "openai": {"chat": True, "tool_calling": True, "embeddings": True},
-                },
-            },
-        )()
+    def test_fails_over_after_transient_retries_with_telemetry(self):
+        registry, groq, openai = self._registry(groq_failures=3)
+        router = ModelRouter(
+            settings=ModelRouterConfig(router_order=("groq", "openai"), max_retries=2),
+            registry=registry,
+            sleeper=lambda _: None,
+            random_fn=lambda: 0,
+        )
 
-        router = ModelRouter(settings=ModelRouterConfig(router_order=("groq", "openai"), max_retries=2), registry=registry, sleeper=lambda _: None)
         result = router.generate(GenerateRequest(messages=[{"role": "user", "content": "fallback"}]), self._trace())
 
         self.assertEqual(result["provider"], "openai")
+        self.assertEqual(groq.failures_remaining, 0)
+        self.assertEqual(openai.name, "openai")
+        self.assertEqual([event.event_type for event in router.events], ["provider.route.selected", "provider.route.fallback", "provider.route.selected"])
+        telemetry = router.telemetry_log[-1]
+        self.assertEqual(telemetry.final_status, "success")
+        self.assertEqual(telemetry.provider_selected, "openai")
+        self.assertEqual(len(telemetry.fallback_transitions), 1)
+        self.assertEqual(telemetry.fallback_transitions[0].from_provider, "groq")
+        self.assertEqual(telemetry.fallback_transitions[0].to_provider, "openai")
 
     def test_embeddings_route_to_embedding_capable_provider(self):
-        groq = StubProvider("groq", ProviderCapabilities(chat=True, tool_calling=True, embeddings=False))
-        openai = StubProvider("openai", ProviderCapabilities(chat=True, tool_calling=True, embeddings=True))
-        registry = type(
-            "Registry",
-            (),
-            {
-                "providers": {"groq": groq, "openai": openai},
-                "capability_matrix": {
-                    "groq": {"chat": True, "tool_calling": True, "embeddings": False},
-                    "openai": {"chat": True, "tool_calling": True, "embeddings": True},
-                },
-            },
-        )()
-
+        registry, _, _ = self._registry()
         router = ModelRouter(settings=ModelRouterConfig(router_order=("groq", "openai"), max_retries=1), registry=registry, sleeper=lambda _: None)
+
         vectors = router.embed(["hello"], self._trace())
 
         self.assertEqual(vectors, [[0.1]])
+
+
+class TestLegacyRoutingCompatibility(unittest.TestCase):
+    def test_routed_model_client_uses_compatibility_layer(self):
+        provider = StubProvider("groq", ProviderCapabilities(chat=True, tool_calling=True, embeddings=False))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            client = RoutedModelClient(providers={"groq": provider}, max_attempts=1)
+
+        result = client.generate(model="llama", prompt="hello", provider="groq")
+
+        self.assertIn("deprecated", str(caught[-1].message).lower())
+        self.assertEqual(result.output_text, "hello")
+        self.assertEqual(client.telemetry_log[-1].final_status, "success")
 
 
 if __name__ == "__main__":
