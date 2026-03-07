@@ -99,12 +99,54 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         self.assertEqual(response.body["execution_mode"], "slow")
         self.assertEqual(response.body["delegation_mode"], "SEQUENTIAL")
 
-    def test_whatsapp_webhook_surface(self):
+    def test_whatsapp_webhook_surface_happy_path(self):
         response = self.handlers.post_webhooks_whatsapp({"MessageSid": "SM1", "From": "+1555", "Body": "Hi"})
 
         self.assertEqual(response.status_code, 202)
         self.assertTrue(response.body["accepted"])
+        self.assertEqual(response.body["provider_message_id"], "SM1")
         self.assertEqual(self.handlers.events[-1]["event_type"], "message.reply.sent")
+
+    def test_whatsapp_webhook_surface_rejects_missing_required_fields(self):
+        before_events = list(self.handlers.events)
+
+        response = self.handlers.post_webhooks_whatsapp({"MessageSid": "SM1", "Body": "Hi"})
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.body["error"]["code"], "invalid_webhook_payload")
+        self.assertEqual(
+            response.body["error"]["details"],
+            [{"field": "from_user", "issue": "required"}],
+        )
+        self.assertEqual(self.handlers.events, before_events)
+
+    def test_whatsapp_webhook_surface_rejects_invalid_types(self):
+        before_events = list(self.handlers.events)
+
+        response = self.handlers.post_webhooks_whatsapp({"MessageSid": 123, "From": "+1555", "Body": "Hi"})
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.body["error"]["code"], "invalid_webhook_payload")
+        self.assertEqual(
+            response.body["error"]["details"],
+            [{"field": "MessageSid", "issue": "must_be_string"}],
+        )
+        self.assertEqual(self.handlers.events, before_events)
+
+    def test_whatsapp_webhook_surface_rejects_unknown_fields(self):
+        before_events = list(self.handlers.events)
+
+        response = self.handlers.post_webhooks_whatsapp(
+            {"MessageSid": "SM1", "From": "+1555", "Body": "Hi", "unexpected": "value"}
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.body["error"]["code"], "invalid_webhook_payload")
+        self.assertEqual(
+            response.body["error"]["details"],
+            [{"field": "unexpected", "issue": "unknown_field"}],
+        )
+        self.assertEqual(self.handlers.events, before_events)
 
     def test_daily_suggestion_surface(self):
         response = self.handlers.post_jobs_daily_suggestion({"user": "alex"})
