@@ -52,6 +52,29 @@ class OutboundCorrelationStore(Protocol):
         """Retrieve a correlation entry by correlation id."""
 
 
+class TaskRecordStore(Protocol):
+    """Persistence boundary for HTTP task records."""
+
+    def put(self, task_id: str, task: dict[str, Any]) -> None:
+        """Persist or update a task record."""
+
+    def get(self, task_id: str) -> dict[str, Any] | None:
+        """Fetch a task record by id."""
+
+    def next_task_sequence(self) -> int:
+        """Return the next default task sequence number."""
+
+
+class EventRecordStore(Protocol):
+    """Persistence boundary for emitted HTTP event records."""
+
+    def append(self, event_type: str, payload: dict[str, Any]) -> None:
+        """Persist one event payload."""
+
+    def list(self) -> list[dict[str, Any]]:
+        """List persisted events in insertion order."""
+
+
 
 
 @dataclass
@@ -107,6 +130,43 @@ class InMemoryOutboundCorrelationStore:
 
     def get(self, correlation_id: str) -> OutboundCorrelationRecord | None:
         return self._records.get(correlation_id)
+
+
+@dataclass
+class InMemoryTaskRecordStore:
+    """In-memory task store for tests and local runtime."""
+
+    _tasks: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def put(self, task_id: str, task: dict[str, Any]) -> None:
+        self._tasks[task_id] = dict(task)
+
+    def get(self, task_id: str) -> dict[str, Any] | None:
+        record = self._tasks.get(task_id)
+        return dict(record) if record is not None else None
+
+    def next_task_sequence(self) -> int:
+        max_seen = 0
+        for task_id in self._tasks:
+            if not task_id.startswith("task-"):
+                continue
+            suffix = task_id.removeprefix("task-")
+            if suffix.isdigit():
+                max_seen = max(max_seen, int(suffix))
+        return max_seen + 1
+
+
+@dataclass
+class InMemoryEventRecordStore:
+    """In-memory event store for tests and local runtime."""
+
+    _events: list[dict[str, Any]] = field(default_factory=list)
+
+    def append(self, event_type: str, payload: dict[str, Any]) -> None:
+        self._events.append({"event_type": event_type, "payload": dict(payload)})
+
+    def list(self) -> list[dict[str, Any]]:
+        return [{"event_type": str(item["event_type"]), "payload": dict(item["payload"])} for item in self._events]
 
 
 @dataclass
@@ -255,14 +315,126 @@ class SqliteMessagingStateStore(
         return sqlite3.connect(self.path)
 
 
+@dataclass
+class SqliteHttpSurfaceStateStore(TaskRecordStore, EventRecordStore):
+    """SQLite-backed store for HTTP task/event records with migration-safe schema setup."""
+
+    path: Path
+
+    def __post_init__(self) -> None:
+        self._lock = threading.RLock()
+        self._initialize()
+
+    def put(self, task_id: str, task: dict[str, Any]) -> None:
+        payload = json.dumps(task, sort_keys=True)
+        status = str(task.get("status", "unknown"))
+        delegation_mode = task.get("delegation_mode")
+        delegation_stages = json.dumps(task.get("delegation_stages") or [], sort_keys=True)
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO http_tasks(task_id, status, delegation_mode, delegation_stages, payload, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    status=excluded.status,
+                    delegation_mode=excluded.delegation_mode,
+                    delegation_stages=excluded.delegation_stages,
+                    payload=excluded.payload,
+                    updated_at=excluded.updated_at
+                """,
+                (task_id, status, delegation_mode, delegation_stages, payload, time.time()),
+            )
+            conn.commit()
+
+    def get(self, task_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT payload FROM http_tasks WHERE task_id = ?", (task_id,)).fetchone()
+            if row is None:
+                return None
+            return json.loads(str(row[0]))
+
+    def next_task_sequence(self) -> int:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COALESCE(MAX(CAST(SUBSTR(task_id, 6) AS INTEGER)), 0)
+                FROM http_tasks
+                WHERE task_id GLOB 'task-[0-9]*'
+                """
+            ).fetchone()
+            return int(row[0]) + 1 if row is not None else 1
+
+    def append(self, event_type: str, payload: dict[str, Any]) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO http_events(event_type, payload, created_at) VALUES(?, ?, ?)",
+                (event_type, json.dumps(payload, sort_keys=True), time.time()),
+            )
+            conn.commit()
+
+    def list(self) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT event_type, payload FROM http_events ORDER BY id ASC"
+            ).fetchall()
+            return [{"event_type": str(row[0]), "payload": json.loads(str(row[1]))} for row in rows]
+
+    def _initialize(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS http_tasks(
+                    task_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    delegation_mode TEXT,
+                    delegation_stages TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS http_events(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            self._ensure_column(conn, "http_tasks", "status", "TEXT NOT NULL DEFAULT 'unknown'")
+            self._ensure_column(conn, "http_tasks", "delegation_mode", "TEXT")
+            self._ensure_column(conn, "http_tasks", "delegation_stages", "TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(conn, "http_tasks", "payload", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "http_tasks", "updated_at", "REAL NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "http_events", "created_at", "REAL NOT NULL DEFAULT 0")
+            conn.commit()
+
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        existing = {str(row[1]) for row in rows}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.path)
+
+
 __all__ = [
     "FileWhatsAppAuthStateStore",
     "InMemoryOutboundCorrelationStore",
+    "InMemoryEventRecordStore",
     "InMemoryProcessedInboundMessageStore",
+    "InMemoryTaskRecordStore",
     "InMemoryWhatsAppAuthStateStore",
+    "EventRecordStore",
     "OutboundCorrelationRecord",
     "OutboundCorrelationStore",
     "ProcessedInboundMessageStore",
+    "SqliteHttpSurfaceStateStore",
     "SqliteMessagingStateStore",
+    "TaskRecordStore",
     "WhatsAppAuthStateStore",
 ]
