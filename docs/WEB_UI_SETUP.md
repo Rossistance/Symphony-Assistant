@@ -294,3 +294,37 @@ $env:GROQ_API_KEY="your_real_groq_key"   # optional
   - You are invoking a Linux/bash flow from Windows paths. Use `run_local_simulator.ps1` for native Windows execution.
 - `No module named 'flask'`
   - Install with `.\.venv\Scripts\python.exe -m pip install flask pytest` and run app with the same interpreter.
+
+## 9) Automatic real Grok orchestration and local artifact outputs
+
+Normal simulator path is now automatic end-to-end from intake to completion:
+
+1. Simulated WhatsApp intake (`/simulator/api/whatsapp-init`)
+2. Real Grok API call (`https://api.x.ai/v1/chat/completions`)
+3. Module-to-module handoff and synthesis
+4. Final deliverable persisted locally
+5. Simulated outbound WhatsApp completion reply
+
+Required env for real model execution:
+
+```bash
+export GROK_API_KEY="your_xai_key"   # or XAI_API_KEY
+export GROK_MODEL="grok-2-latest"    # optional override
+```
+
+Output location (default):
+
+- `outputs/<task_id>/normalized_intake_payload.json`
+- `outputs/<task_id>/grok_request_summary.json`
+- `outputs/<task_id>/grok_response.json`
+- `outputs/<task_id>/module_planning_output.json`
+- `outputs/<task_id>/final_deliverable.txt`
+- `outputs/<task_id>/execution_manifest.json`
+
+Verification command:
+
+```bash
+python scripts/verify_auto_orchestration.py
+```
+
+The verifier fails fast if the real Grok key is missing, and checks that the expected output artifacts were written locally.
