@@ -12,6 +12,7 @@ from app.api.http_surfaces import (
     TaskStore,
 )
 from app.messaging.agent_bus import AgentMessageBroker
+from app.messaging.base import InboundMessage
 from app.services.agent_runtime import AgentRuntime
 from app.services.model_routing import ModelResponse, RoutedModelClient, TransientProviderError
 from app.services.policy_engine import ActionPolicyEngine, ActionRequest
@@ -151,6 +152,36 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
             [{"field": "unexpected", "issue": "unknown_field"}],
         )
         self.assertEqual(self.handlers.events, before_events)
+
+    def test_whatsapp_webhook_surface_dedupes_replays(self):
+        first = self.handlers.post_webhooks_whatsapp({"MessageSid": "SM1", "From": "+1555", "Body": "Hi"})
+        second = self.handlers.post_webhooks_whatsapp({"MessageSid": "SM1", "From": "+1555", "Body": "Hi"})
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 202)
+        self.assertTrue(second.body["duplicate"])
+        event_types = [event["event_type"] for event in self.handlers.events]
+        self.assertIn("message.inbound.accepted", event_types)
+        self.assertIn("message.inbound.duplicate", event_types)
+
+    def test_gateway_socket_callback_uses_shared_pipeline(self):
+        inbound = InboundMessage(
+            channel="whatsapp",
+            from_user="+1555",
+            body="Hi",
+            provider_message_id="SM-GW-1",
+            provider_thread_id="thread-1",
+        )
+
+        first = self.handlers.ingest_gateway_inbound(inbound)
+        replay = self.handlers.ingest_gateway_inbound(inbound)
+
+        self.assertEqual(first.status_code, 202)
+        self.assertTrue(first.body["accepted"])
+        self.assertFalse(first.body["duplicate"])
+        self.assertEqual(replay.status_code, 202)
+        self.assertFalse(replay.body["accepted"])
+        self.assertTrue(replay.body["duplicate"])
 
     def test_daily_suggestion_surface(self):
         response = self.handlers.post_jobs_daily_suggestion({"user": "alex"})
