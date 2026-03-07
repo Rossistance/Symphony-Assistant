@@ -87,6 +87,8 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         self.assertEqual(response.body["deliverable"], "Release summary v1")
         self.assertEqual(len(response.body["deliverables"]), 1)
         self.assertTrue(response.body["deliverables"][0]["share_url"].startswith("https://drive.example/files/"))
+        self.assertIsNone(response.body["deliverables"][0]["parent_folder_id"])
+        self.assertEqual(response.body["deliverables"][0]["access_mode"], "view_only")
         self.assertIn("Done — I completed draft release summary.", response.body["completion_message"])
 
         lookup = self.handlers.get_api_v1_tasks_id("task-deliverable")
@@ -154,6 +156,9 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
         self.assertIn("deliverable.published", event_types)
         self.assertIn("message.reply.sent", event_types)
         self.assertIn("task.analysis.completed", event_types)
+        deliverable_event = next(event for event in self.handlers.events if event["event_type"] == "deliverable.published")
+        self.assertIn("parent_folder_id", deliverable_event["payload"])
+        self.assertIn("access_mode", deliverable_event["payload"])
 
     def test_mode_selection_by_dependency_profile_and_slow_mode_trigger(self):
         response = self.handlers.post_jobs_orchestrate(
