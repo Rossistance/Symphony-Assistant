@@ -178,6 +178,7 @@ class SqliteMessagingStateStore(
     """SQLite-backed runtime store for auth blobs, inbound dedupe, and outbound correlation."""
 
     path: Path
+    inbound_dedupe_ttl_seconds: float | None = None
 
     def __post_init__(self) -> None:
         self._lock = threading.RLock()
@@ -208,12 +209,38 @@ class SqliteMessagingStateStore(
 
     def reserve(self, dedupe_key: str) -> bool:
         with self._lock, self._connect() as conn:
+            now = time.time()
+            if self.inbound_dedupe_ttl_seconds is not None:
+                self._cleanup_inbound_dedupe_keys_conn(
+                    conn,
+                    retention_seconds=self.inbound_dedupe_ttl_seconds,
+                    now=now,
+                )
             cursor = conn.execute(
                 "INSERT OR IGNORE INTO inbound_dedupe_keys(dedupe_key, created_at) VALUES(?, ?)",
-                (dedupe_key, time.time()),
+                (dedupe_key, now),
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    def cleanup_inbound_dedupe_keys(
+        self,
+        *,
+        retention_seconds: float | None = None,
+        now: float | None = None,
+    ) -> int:
+        effective_retention = self.inbound_dedupe_ttl_seconds if retention_seconds is None else retention_seconds
+        if effective_retention is None:
+            return 0
+        current_time = time.time() if now is None else now
+        with self._lock, self._connect() as conn:
+            deleted = self._cleanup_inbound_dedupe_keys_conn(
+                conn,
+                retention_seconds=effective_retention,
+                now=current_time,
+            )
+            conn.commit()
+            return deleted
 
     def record(self, entry: OutboundCorrelationRecord) -> None:
         with self._lock, self._connect() as conn:
@@ -297,6 +324,12 @@ class SqliteMessagingStateStore(
             )
             conn.execute(
                 """
+                CREATE INDEX IF NOT EXISTS idx_inbound_dedupe_keys_created_at
+                ON inbound_dedupe_keys(created_at)
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS outbound_correlations(
                     correlation_id TEXT PRIMARY KEY,
                     channel TEXT NOT NULL,
@@ -310,6 +343,17 @@ class SqliteMessagingStateStore(
                 """
             )
             conn.commit()
+
+    def _cleanup_inbound_dedupe_keys_conn(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        retention_seconds: float,
+        now: float,
+    ) -> int:
+        cutoff = now - retention_seconds
+        cursor = conn.execute("DELETE FROM inbound_dedupe_keys WHERE created_at < ?", (cutoff,))
+        return int(cursor.rowcount)
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path)
