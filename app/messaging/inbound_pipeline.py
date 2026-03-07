@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Protocol
 
 from app.messaging.base import InboundMessage
@@ -26,6 +28,33 @@ class InMemoryInboundDedupeStore:
             return False
         self._seen.add(dedupe_key)
         return True
+
+
+@dataclass
+class FileInboundDedupeStore:
+    """JSON-file dedupe store to persist inbound dedupe keys across restarts."""
+
+    path: Path
+
+    def reserve(self, dedupe_key: str) -> bool:
+        seen = self._load()
+        if dedupe_key in seen:
+            return False
+        seen.add(dedupe_key)
+        self._save(seen)
+        return True
+
+    def _load(self) -> set[str]:
+        if not self.path.exists():
+            return set()
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            return set()
+        return {str(item) for item in payload}
+
+    def _save(self, seen: set[str]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(sorted(seen)), encoding="utf-8")
 
 
 @dataclass(frozen=True)
@@ -83,13 +112,13 @@ class InboundIngestionPipeline:
         stable_provider_id = str(inbound.metadata.get("stable_provider_id") or "").strip()
         if stable_provider_id:
             return f"{inbound.channel}:metadata_provider:{stable_provider_id}"
-
-        return f"{inbound.channel}:sender:{inbound.from_user.strip()}:body:{inbound.body.strip()}"
+        raise ValueError("InboundMessage must include a provider identifier for deduplication")
 
 
 __all__ = [
     "InboundDedupeStore",
     "InboundIngestionPipeline",
     "InboundIngestionResult",
+    "FileInboundDedupeStore",
     "InMemoryInboundDedupeStore",
 ]
