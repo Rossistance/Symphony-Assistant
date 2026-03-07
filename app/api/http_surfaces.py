@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -74,6 +76,41 @@ class HttpSurfaceHandlers:
 
     def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         self.event_store.append(normalize_event_type(event_type), payload)
+
+    def _materialize_artifacts(
+        self,
+        *,
+        task_id: str,
+        deliverable: str,
+        artifacts: list[DeliverableArtifact],
+    ) -> list[DeliverableArtifact]:
+        """Ensure local artifact files exist in the repository deliverables folder."""
+
+        output_root = Path(os.getenv("DELIVERABLES_LOCAL_OUTPUT_DIR", "deliverables"))
+        task_dir = output_root / task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+
+        materialized: list[DeliverableArtifact] = []
+        for artifact in artifacts:
+            source = Path(artifact.source_ref)
+            if source.exists():
+                materialized.append(artifact)
+                continue
+
+            local_name = source.name or f"{artifact.artifact_id}.txt"
+            local_path = task_dir / local_name
+            if not local_path.exists():
+                local_path.write_text(deliverable, encoding="utf-8")
+
+            materialized.append(
+                DeliverableArtifact(
+                    artifact_id=artifact.artifact_id,
+                    title=artifact.title,
+                    mime_type=artifact.mime_type,
+                    source_ref=str(local_path),
+                )
+            )
+        return materialized
 
     def _publish_failure_response(
         self,
@@ -244,6 +281,8 @@ class HttpSurfaceHandlers:
                     source_ref="deliverable.txt",
                 )
             ]
+
+        artifacts = self._materialize_artifacts(task_id=task_id, deliverable=deliverable, artifacts=artifacts)
 
         assert self.deliverable_publisher is not None
         mode = detect_execution_mode(prompt)
