@@ -3,31 +3,16 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Protocol
+from typing import Callable
 
 from app.messaging.base import InboundMessage
+from app.messaging.state_store import InMemoryProcessedInboundMessageStore, ProcessedInboundMessageStore
 
 
-class InboundDedupeStore(Protocol):
-    """Persistence boundary for inbound deduplication state."""
-
-    def reserve(self, dedupe_key: str) -> bool:
-        """Reserve key for processing. Returns False when the key already exists."""
-
-
-@dataclass
-class InMemoryInboundDedupeStore:
-    """In-memory dedupe store for tests/local usage."""
-
-    _seen: set[str] = field(default_factory=set)
-
-    def reserve(self, dedupe_key: str) -> bool:
-        if dedupe_key in self._seen:
-            return False
-        self._seen.add(dedupe_key)
-        return True
+InboundDedupeStore = ProcessedInboundMessageStore
+InMemoryInboundDedupeStore = InMemoryProcessedInboundMessageStore
 
 
 @dataclass

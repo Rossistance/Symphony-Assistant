@@ -8,10 +8,8 @@ from typing import Any
 
 from app.messaging.agent_bus import AgentMessageBroker
 from app.messaging.base import InboundMessage
-from app.messaging.inbound_pipeline import (
-    InMemoryInboundDedupeStore,
-    InboundIngestionPipeline,
-)
+from app.messaging.inbound_pipeline import InboundIngestionPipeline
+from app.messaging.runtime_state import get_runtime_state_store
 from app.services.deliverables import (
     DeliverableArtifact,
     DeliverablePublisher,
@@ -74,7 +72,7 @@ class HttpSurfaceHandlers:
             self.deliverable_publisher = InMemoryDeliverablePublisher()
         if self.inbound_pipeline is None:
             self.inbound_pipeline = InboundIngestionPipeline(
-                dedupe_store=InMemoryInboundDedupeStore(),
+                dedupe_store=get_runtime_state_store(),
                 event_emitter=self._emit,
             )
 

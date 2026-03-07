@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import random
 import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
+
+from app.messaging.state_store import FileWhatsAppAuthStateStore as FileAuthStateStore
+from app.messaging.state_store import WhatsAppAuthStateStore
 
 
 class GatewaySessionState(str, Enum):
@@ -43,32 +44,6 @@ class LinkedDeviceConnector(Protocol):
         """Disconnect from the linked-device session."""
 
 
-class AuthStateStore(Protocol):
-    """Persistence boundary for linked-device auth-state."""
-
-    def load(self) -> dict[str, Any]:
-        """Load previously persisted auth-state."""
-
-    def save(self, state: Mapping[str, Any]) -> None:
-        """Persist updated auth-state."""
-
-
-@dataclass
-class FileAuthStateStore:
-    """JSON file implementation of linked-device auth-state persistence."""
-
-    path: Path
-
-    def load(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {}
-        return json.loads(self.path.read_text(encoding="utf-8"))
-
-    def save(self, state: Mapping[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(dict(state), sort_keys=True), encoding="utf-8")
-
-
 @dataclass(frozen=True)
 class GatewaySessionSnapshot:
     """Thread-safe session snapshot for observability and callers."""
@@ -87,7 +62,7 @@ class WhatsAppGateway:
         *,
         session_id: str,
         connector: LinkedDeviceConnector,
-        auth_state_store: AuthStateStore,
+        auth_state_store: WhatsAppAuthStateStore,
         telemetry_handler: Callable[[ConnectionTelemetryEvent], None] | None = None,
         max_reconnect_attempts: int = 5,
         base_backoff_seconds: float = 1.0,

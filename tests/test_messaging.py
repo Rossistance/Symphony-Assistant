@@ -1,5 +1,7 @@
 import os
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -7,6 +9,7 @@ from app.config import MessagingConfig
 from app.messaging.adapters.whatsapp import WhatsAppCloudAdapter
 from app.messaging.base import InboundMessage
 from app.messaging.router import MessagingRouter
+from app.messaging.state_store import SqliteMessagingStateStore
 from app.webhooks.inbound import parse_inbound_webhook
 
 
@@ -62,7 +65,28 @@ class MessagingRouterTests(unittest.TestCase):
 
         self.assertEqual(result.provider_message_id, "provider-5")
         self.assertEqual(result.provider_thread_id, "conv-7")
-        self.assertEqual(result.raw_response, {"provider_message_id": "provider-5", "provider_thread_id": "conv-7", "status": "queued"})
+        self.assertEqual(result.raw_response["provider_message_id"], "provider-5")
+        self.assertEqual(result.raw_response["provider_thread_id"], "conv-7")
+        self.assertEqual(result.raw_response["status"], "queued")
+        self.assertTrue(result.raw_response["correlation_id"])
+
+
+    def test_whatsapp_adapter_records_outbound_correlation(self):
+        with TemporaryDirectory() as tmp_dir:
+            state_store = SqliteMessagingStateStore(path=Path(tmp_dir) / "messaging.db")
+            gateway = FakeGatewayClient(responses=[{"provider_message_id": "provider-8", "provider_thread_id": "thread-1"}])
+            adapter = WhatsAppCloudAdapter(gateway_client=gateway, correlation_store=state_store)
+
+            result = adapter.send_message("+1555", "hello")
+
+            correlation_id = str(result.raw_response.get("correlation_id"))
+            record = state_store.get(correlation_id)
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record.provider_message_id, "provider-8")
+            self.assertEqual(record.provider_thread_id, "thread-1")
+            self.assertEqual(record.recipient, "+1555")
+
 
 
 class WebhookParserTests(unittest.TestCase):

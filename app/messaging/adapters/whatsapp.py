@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from uuid import uuid4
 from typing import Any
 
 from app.messaging.base import InboundMessage, OutboundResult
 from app.messaging.gateway_client import GatewayClient, HttpGatewayClient
+from app.messaging.state_store import InMemoryOutboundCorrelationStore, OutboundCorrelationRecord, OutboundCorrelationStore
 
 
 def _first_non_empty(response: dict[str, Any], *keys: str) -> str | None:
@@ -24,6 +26,7 @@ class WhatsAppCloudAdapter:
     channel = "whatsapp"
     session_id: str | None = None
     gateway_client: GatewayClient = field(default_factory=HttpGatewayClient.from_env)
+    correlation_store: OutboundCorrelationStore = field(default_factory=InMemoryOutboundCorrelationStore)
 
     def __post_init__(self) -> None:
         if self.session_id is None:
@@ -44,10 +47,24 @@ class WhatsAppCloudAdapter:
             "thread_id",
             "conversation_id",
         )
+        correlation_id = str(payload.get("correlation_id") or uuid4())
+        self.correlation_store.record(
+            OutboundCorrelationRecord(
+                correlation_id=correlation_id,
+                channel=self.channel,
+                provider_message_id=provider_message_id,
+                provider_thread_id=provider_thread_id,
+                recipient=str(payload.get("to") or ""),
+                session_id=self.session_id,
+                in_reply_to=str(payload.get("in_reply_to")) if payload.get("in_reply_to") else None,
+            )
+        )
+
+        raw_response = {**response, "correlation_id": correlation_id}
         return OutboundResult(
             provider_message_id=provider_message_id,
             provider_thread_id=provider_thread_id,
-            raw_response=response,
+            raw_response=raw_response,
         )
 
     def send_message(self, to: str, text: str, *, thread_id: str | None = None) -> OutboundResult:

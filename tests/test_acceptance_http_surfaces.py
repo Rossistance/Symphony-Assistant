@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from app.api.approvals import DECISION_ROUTE, post_approval_decision
 from app.api.http_surfaces import (
@@ -13,6 +15,7 @@ from app.api.http_surfaces import (
 )
 from app.messaging.agent_bus import AgentMessageBroker
 from app.messaging.base import InboundMessage
+from app.messaging.runtime_state import get_runtime_state_store
 from app.services.agent_runtime import AgentRuntime
 from app.services.model_routing import ModelResponse, RoutedModelClient, TransientProviderError
 from app.services.policy_engine import ActionPolicyEngine, ActionRequest
@@ -33,11 +36,19 @@ class FakeProvider:
 
 class AcceptanceHttpSurfaceTests(unittest.TestCase):
     def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        import os
+
+        os.environ["MESSAGING_STATE_DB_PATH"] = str(Path(self.temp_dir.name) / "messaging_state.db")
+        get_runtime_state_store.cache_clear()
         self.handlers = HttpSurfaceHandlers(
             runtime=AgentRuntime(clock=lambda: 0),
             message_bus=AgentMessageBroker(),
             tasks=TaskStore.create(),
         )
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
 
     def test_contract_routes_exist(self):
         self.assertEqual(WHATSAPP_WEBHOOK_ROUTE, "/webhooks/whatsapp")
