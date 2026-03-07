@@ -18,7 +18,7 @@ from app.messaging.agent_bus import AgentMessageBroker
 from app.messaging.base import InboundMessage
 from app.messaging.runtime_state import get_runtime_state_store
 from app.services.agent_runtime import AgentRuntime
-from app.services.deliverables import InMemoryDeliverablePublisher
+from app.services.deliverables import DeliverableArtifact, DeliverablePublisherError, InMemoryDeliverablePublisher
 from app.services.model_routing import ModelResponse, RoutedModelClient, TransientProviderError
 from app.services.policy_engine import ActionPolicyEngine, ActionRequest
 
@@ -34,6 +34,11 @@ class FakeProvider:
         if isinstance(result, Exception):
             raise result
         return result
+
+
+class FailingDeliverablePublisher:
+    def publish(self, *, task_id: str, artifacts: list[DeliverableArtifact]):
+        raise DeliverablePublisherError("simulated publish outage")
 
 
 class AcceptanceHttpSurfaceTests(unittest.TestCase):
@@ -131,8 +136,41 @@ class AcceptanceHttpSurfaceTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.body["error"], "deliverable_publish_credential_error")
-        self.assertEqual(handlers.events[-1]["event_type"], "deliverable.publish.failed")
-        self.assertEqual(handlers.events[-1]["payload"]["error_type"], "credentials")
+        failed_event = next(event for event in handlers.events if event["event_type"] == "deliverable.publish.failed")
+        self.assertEqual(failed_event["payload"]["error_type"], "credentials")
+        self.assertEqual(failed_event["payload"]["reason_code"], "deliverable_publish_credential_error")
+        self.assertEqual(failed_event["payload"]["correlation_id"], "task-cred")
+        self.assertEqual(handlers.events[-1]["event_type"], "task.status.updated")
+
+    def test_orchestrate_publish_failure_tracks_failed_status_without_false_completion_reply(self):
+        handlers = HttpSurfaceHandlers(
+            runtime=AgentRuntime(clock=lambda: 0),
+            message_bus=AgentMessageBroker(),
+            tasks=TaskStore.create(),
+            deliverable_publisher=FailingDeliverablePublisher(),
+        )
+
+        response = handlers.post_jobs_orchestrate({"task_id": "task-publish-fail", "prompt": "draft plan"})
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.body["status"], "failed")
+        self.assertEqual(response.body["error"], "deliverable_publish_failed")
+        self.assertEqual(response.body["failure_reason_code"], "deliverable_publish_failed")
+        self.assertIn("couldn't publish", response.body["completion_message"].lower())
+
+        event_types = [event["event_type"] for event in handlers.events]
+        self.assertIn("deliverable.publish.failed", event_types)
+        self.assertIn("task.status.updated", event_types)
+        self.assertNotIn("message.reply.sent", event_types)
+
+        failed_event = next(event for event in handlers.events if event["event_type"] == "deliverable.publish.failed")
+        self.assertEqual(failed_event["payload"]["reason_code"], "deliverable_publish_failed")
+        self.assertEqual(failed_event["payload"]["correlation_id"], "task-publish-fail")
+
+        status_event = next(event for event in handlers.events if event["event_type"] == "task.status.updated")
+        self.assertEqual(status_event["payload"]["status"], "failed")
+        self.assertEqual(status_event["payload"]["correlation_id"], "task-publish-fail")
+
 
     def test_swarm_spawn_and_message_synthesis_events(self):
         response = self.handlers.post_jobs_orchestrate(
