@@ -223,28 +223,26 @@ class HttpSurfaceHandlers:
         )
 
         mode = detect_execution_mode(prompt)
-        self.tasks.put(
-            task_id,
-            {
-                "task_id": task_id,
-                "status": "completed",
-                "deliverable": deliverable,
-                "deliverables": [
-                    {
-                        "artifact_id": item.artifact_id,
-                        "title": item.title,
-                        "mime_type": item.mime_type,
-                        "drive_file_id": item.drive_file_id,
-                        "share_url": item.share_url,
-                    }
-                    for item in published
-                ],
-                "completion_message": completion_message,
-                "execution_mode": mode.value,
-                "delegation_mode": plan.mode.value,
-                "delegation_stages": plan.stages,
-            },
-        )
+        task_payload = {
+            "task_id": task_id,
+            "status": "completed",
+            "deliverable": deliverable,
+            "deliverables": [
+                {
+                    "artifact_id": item.artifact_id,
+                    "title": item.title,
+                    "mime_type": item.mime_type,
+                    "drive_file_id": item.drive_file_id,
+                    "share_url": item.share_url,
+                }
+                for item in published
+            ],
+            "completion_message": completion_message,
+            "execution_mode": mode.value,
+            "delegation_mode": plan.mode.value,
+            "delegation_stages": plan.stages,
+        }
+        self.tasks.put(task_id, task_payload)
         return ApiResponse(status_code=200, body=self.tasks.get(task_id) or {})
 
     def post_jobs_daily_suggestion(self, payload: dict[str, Any]) -> ApiResponse:
